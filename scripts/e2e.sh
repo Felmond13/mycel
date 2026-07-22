@@ -197,10 +197,17 @@ if command -v pasta >/dev/null 2>&1; then
   # Loopback is up inside an isolated namespace.
   MYCEL_STORE="$WORK/store2" "$MYC" run --net isolated alpine:3.20 -- \
     /bin/ping -c1 -W1 127.0.0.1 > /dev/null || { echo "isolated loopback down"; exit 1; }
-  # A machine without pasta gets the actionable install hint.
-  err="$(env PATH=/usr/bin:/bin HOME="$WORK" MYCEL_STORE="$WORK/store2" \
-    "$MYC" run --net isolated alpine:3.20 -- /bin/true 2>&1 || true)"
-  echo "$err" | grep -q "passt" || { echo "missing passt hint: $err"; exit 1; }
+  # A machine without pasta gets the actionable install hint. The check
+  # simulates that machine by trimming PATH to /usr/bin:/bin, so it only
+  # makes sense when pasta lives elsewhere (on GitHub runners and some
+  # distros it is /usr/bin/pasta, and the simulation cannot work).
+  if [ ! -x /usr/bin/pasta ] && [ ! -x /bin/pasta ]; then
+    err="$(env PATH=/usr/bin:/bin HOME="$WORK" MYCEL_STORE="$WORK/store2" \
+      "$MYC" run --net isolated alpine:3.20 -- /bin/true 2>&1 || true)"
+    echo "$err" | grep -q "passt" || { echo "missing passt hint: $err"; exit 1; }
+  else
+    echo "pasta is in /usr/bin — skipping missing-pasta hint check"
+  fi
 else
   echo "pasta not installed — SKIPPING network isolation e2e (sudo apt install passt to enable)"
 fi

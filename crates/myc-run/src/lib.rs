@@ -89,9 +89,7 @@ pub fn pasta_path() -> Option<PathBuf> {
     if let Some(home) = std::env::var_os("HOME") {
         dirs.push(PathBuf::from(home).join(".local/bin"));
     }
-    dirs.into_iter()
-        .map(|d| d.join(name))
-        .find(|p| p.is_file())
+    dirs.into_iter().map(|d| d.join(name)).find(|p| p.is_file())
 }
 
 /// Options for a single container run.
