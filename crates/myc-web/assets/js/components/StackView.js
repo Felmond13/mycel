@@ -19,6 +19,11 @@ export default {
   computed: {
     missing() { return this.d ? this.d.services.filter(s => !s.installed).map(s => s.image) : []; },
     anyRunning() { return this.d && this.d.services.some(s => s.state && s.state.running); },
+    isPod() { return !!(this.d && this.d.network && this.d.network.mode === "pod"); },
+    // Pod mode requested but pasta missing: the stack runs on the host
+    // network instead — surface that permanently, not just in a toast.
+    podUnavailable() { return this.isPod && this.d.network && !this.d.network.available; },
+    podPorts() { return (this.isPod && this.d.network.ports) || []; },
   },
   mounted() {
     this.load();
@@ -58,9 +63,16 @@ export default {
         const r = await api.post("/api/stacks/" + encodeURIComponent(this.arg) + "/up");
         const n = r.started.length;
         toast(n ? "Started " + n + " app" + (n === 1 ? "" : "s") : "Everything was already running");
+        if (r.network_note) toast(r.network_note, true);
         this.load();
       } catch (e) { toast(e.message, true); this.load(); }
       this.upBusy = false;
+    },
+    // "web on localhost:8080" for a published service, "internal only" text
+    // for the rest — no namespace/pod jargon on screen.
+    podPortText(s) {
+      if (!s.published || !s.published.length) return "internal only — reachable by the other apps in this stack";
+      return "on " + s.published.map(p => "localhost:" + p.host).join(", ");
     },
     async down() {
       const ok = await confirmDialog("Stop every app in \u201c" + this.arg + "\u201d?",
@@ -115,7 +127,9 @@ export default {
     <skeleton-block v-else-if="!d" h="76px" :n="3"></skeleton-block>
     <template v-else>
       <div class="row spread" style="margin-bottom:6px">
-        <h1 class="title" style="margin:0"><b>{{ d.name }}</b></h1>
+        <h1 class="title" style="margin:0"><b>{{ d.name }}</b>
+          <span v-if="isPod && !podUnavailable" class="pill teal" title="the apps of this stack share one private network">private network</span>
+        </h1>
         <div class="row">
           <button class="btn sm primary" :disabled="upBusy" @click="up">
             <span v-if="upBusy" class="spinner"></span>{{ upBusy ? 'Starting…' : '▶ Start all' }}
@@ -127,7 +141,21 @@ export default {
           <button class="btn sm danger" @click="del">Delete</button>
         </div>
       </div>
-      <div class="sub">Apps start in dependency order. They share your computer's network, so they find each other on localhost.</div>
+      <div v-if="isPod && !podUnavailable" class="sub">
+        Apps start in dependency order, inside their own private network: they find each other on localhost,
+        and your computer only sees
+        <template v-if="podPorts.length">{{ podPorts.map(p => 'localhost:' + p.host).join(', ') }}.</template>
+        <template v-else>nothing — no port is opened on this computer.</template>
+      </div>
+      <div v-else class="sub">Apps start in dependency order. They share your computer's network, so they find each other on localhost.</div>
+
+      <div v-if="podUnavailable" class="card" style="border-color:rgba(251,191,36,.4)">
+        <b style="color:var(--amber)">Private network not available on this computer</b>
+        <div style="color:var(--muted);font-size:13px;margin-top:6px">
+          This stack asks for its own private network, but the 'passt' package is not installed —
+          its apps share your computer's network instead. To enable it: <code>sudo apt install passt</code>
+        </div>
+      </div>
 
       <div v-if="missing.length" class="card" style="border-color:rgba(251,191,36,.4)">
         <b style="color:var(--amber)">Some apps in this stack aren't in your library yet</b>
@@ -146,6 +174,7 @@ export default {
             <span v-if="s.depends_on.length" class="pill gray" title="starts after">after {{ s.depends_on.join(', ') }}</span>
           </div>
           <div class="im"><ref-name :reference="s.image" :bold="false"></ref-name><template v-if="s.command.length"> — {{ s.command.join(' ') }}</template></div>
+          <div v-if="isPod && !podUnavailable" class="im" style="color:var(--muted)">{{ podPortText(s) }}</div>
         </div>
         <div class="st">
           {{ stateText(s) }}

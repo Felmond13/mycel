@@ -1,6 +1,8 @@
 // "Share" dialog for one library app: download it as a portable .mycel
-// file, or send it to a hub (only the files the hub is missing travel —
-// that's the headline, so we show the numbers proudly).
+// file, download it as a standard Docker/OCI image (docker load,
+// Kubernetes, any cloud — the no-lock-in exit), or send it to a hub (only
+// the files the hub is missing travel — that's the headline, so we show
+// the numbers proudly).
 
 import { api } from "../api.js";
 import { fmtBytes, shortRef } from "../format.js";
@@ -22,6 +24,7 @@ export default {
   computed: {
     title() { return shortRef(this.env.name); },
     exportHref() { return "/api/export/" + encodeURIComponent(this.env.id); },
+    exportOciHref() { return "/api/export-oci/" + encodeURIComponent(this.env.id); },
     sentText() {
       const r = this.sent;
       if (!r) return "";
@@ -54,7 +57,7 @@ export default {
   <div class="overlay" @click.self="$emit('close')">
     <div class="dialog" style="width:min(520px,92vw)">
       <h3>Share {{ title }}</h3>
-      <p style="margin-bottom:16px">Two ways to hand this app to someone else — pick whichever fits.</p>
+      <p style="margin-bottom:16px">Three ways to hand this app to someone else — pick whichever fits.</p>
 
       <span class="label">Download as a file</span>
       <p style="margin:4px 0 10px;color:var(--muted);font-size:13px">
@@ -62,6 +65,13 @@ export default {
         whatever — and they can import it into their own library. No internet needed on their side.
       </p>
       <a :href="exportHref" download><button class="btn primary" style="margin-bottom:18px">Download .mycel file</button></a>
+
+      <span class="label">Download as a Docker image</span>
+      <p style="margin:4px 0 10px;color:var(--muted);font-size:13px">
+        A standard image file — works with <span class="mono">docker load</span>, Podman,
+        Kubernetes, any cloud. Nothing about Mycel locks you in.
+      </p>
+      <a :href="exportOciHref" download><button class="btn" style="margin-bottom:18px">Download Docker image</button></a>
 
       <span class="label">Send to a hub</span>
       <p style="margin:4px 0 10px;color:var(--muted);font-size:13px">

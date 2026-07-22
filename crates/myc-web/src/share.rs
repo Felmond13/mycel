@@ -25,8 +25,9 @@ use tokio::io::AsyncWriteExt;
 pub(crate) const IMPORT_BODY_LIMIT: usize = 8 * 1024 * 1024 * 1024;
 
 /// Download filename for an environment: `docker.io/library/redis:7-alpine`
-/// becomes `redis-7-alpine.mycel`.
-fn download_name(manifest_name: &str) -> String {
+/// becomes `redis-7-alpine.<ext>` (`redis-7-alpine.mycel`,
+/// `redis-7-alpine.docker.tar`).
+fn download_name(manifest_name: &str, ext: &str) -> String {
     let short = manifest_name
         .strip_prefix("docker.io/library/")
         .unwrap_or(manifest_name);
@@ -44,7 +45,7 @@ fn download_name(manifest_name: &str) -> String {
     } else {
         trimmed
     };
-    format!("{base}.mycel")
+    format!("{base}.{ext}")
 }
 
 /// `GET /api/export/{ref}`: pack the environment (manifest + every blob)
@@ -71,20 +72,56 @@ pub(crate) async fn export_env(
         })?;
         let size = file.metadata().map_err(internal)?.len();
         file.seek(SeekFrom::Start(0)).map_err(internal)?;
-        Ok((file, download_name(&manifest.name), size))
+        Ok((file, download_name(&manifest.name, "mycel"), size))
     })
     .await?;
 
+    Ok(stream_download(file, "application/gzip", &name, size))
+}
+
+/// Stream a fully built temp file out as a browser download.
+fn stream_download(file: std::fs::File, content_type: &str, name: &str, size: u64) -> Response {
     let stream = tokio_util::io::ReaderStream::new(tokio::fs::File::from_std(file));
     let headers = [
-        (header::CONTENT_TYPE, "application/gzip".to_string()),
+        (header::CONTENT_TYPE, content_type.to_string()),
         (header::CONTENT_LENGTH, size.to_string()),
         (
             header::CONTENT_DISPOSITION,
             format!("attachment; filename=\"{name}\""),
         ),
     ];
-    Ok((headers, Body::from_stream(stream)).into_response())
+    (headers, Body::from_stream(stream)).into_response()
+}
+
+/// `GET /api/export-oci/{ref}`: rebuild the environment as a standard
+/// Docker/OCI image (`myc_oci::export_oci_image` — the same code as
+/// `myc export --oci`) and stream it as a `.docker.tar` download. The tar
+/// is dual-format: `docker load`-able and a valid OCI layout for podman,
+/// skopeo, Kubernetes tooling and every cloud registry.
+pub(crate) async fn export_oci(
+    State(app): State<App>,
+    UrlPath(reference): UrlPath<String>,
+) -> Result<Response, ApiError> {
+    check_reference(&reference)?;
+    let (file, name, size) = blocking(move || {
+        let store = open_store(&app.root)?;
+        let (_, manifest) = resolve(&store, &reference)?;
+        let mut file = tempfile::tempfile().map_err(internal)?;
+        myc_oci::export_oci_image(&store, &manifest, &mut file).map_err(|e| match e {
+            myc_oci::OciError::MissingBlobs(n) => bad_request(format!(
+                "cannot export '{}' — {n} of its files are not on this machine yet \
+                 (run `myc pull` to complete it first)",
+                manifest.name
+            )),
+            other => internal(other),
+        })?;
+        let size = file.metadata().map_err(internal)?.len();
+        file.seek(SeekFrom::Start(0)).map_err(internal)?;
+        Ok((file, download_name(&manifest.name, "docker.tar"), size))
+    })
+    .await?;
+
+    Ok(stream_download(file, "application/x-tar", &name, size))
 }
 
 fn import_error(e: ArchiveError) -> ApiError {
@@ -265,17 +302,29 @@ mod tests {
     #[test]
     fn download_names_are_clean() {
         assert_eq!(
-            download_name("docker.io/library/redis:7-alpine"),
+            download_name("docker.io/library/redis:7-alpine", "mycel"),
             "redis-7-alpine.mycel"
         );
         assert_eq!(
-            download_name("docker.io/library/alpine:3.20"),
+            download_name("docker.io/library/alpine:3.20", "mycel"),
             "alpine-3.20.mycel"
         );
         assert_eq!(
-            download_name("ghcr.io/owner/app:v1"),
+            download_name("ghcr.io/owner/app:v1", "mycel"),
             "ghcr.io-owner-app-v1.mycel"
         );
-        assert_eq!(download_name("///"), "environment.mycel");
+        assert_eq!(download_name("///", "mycel"), "environment.mycel");
+    }
+
+    #[test]
+    fn docker_download_names_use_the_docker_tar_extension() {
+        assert_eq!(
+            download_name("docker.io/library/redis:7-alpine", "docker.tar"),
+            "redis-7-alpine.docker.tar"
+        );
+        assert_eq!(
+            download_name("ghcr.io/owner/app:v1", "docker.tar"),
+            "ghcr.io-owner-app-v1.docker.tar"
+        );
     }
 }

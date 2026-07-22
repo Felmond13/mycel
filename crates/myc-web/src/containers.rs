@@ -84,6 +84,12 @@ pub struct ContainerSpec {
     pub stack: Option<String>,
     /// Service name within the stack.
     pub service: Option<String>,
+    /// Stack pod mode: join the stack's shared private network (the pod
+    /// holder's namespaces) instead of the host network. The holder pid is
+    /// resolved at start time from the pod state file, so the spec stays
+    /// valid across holder restarts.
+    #[serde(default)]
+    pub pod: bool,
 }
 
 struct ContainerState {
@@ -133,7 +139,7 @@ impl ContainerState {
             "env": self.spec.env,
             "workdir": self.spec.workdir,
             "port": self.spec.port,
-            "network": if self.spec.isolated_network { "isolated" } else { "host" },
+            "network": if self.spec.pod { "pod" } else if self.spec.isolated_network { "isolated" } else { "host" },
             "ports": self.spec.ports.iter()
                 .map(|m| json!({ "host": m.host, "container": m.container }))
                 .collect::<Vec<_>>(),
@@ -425,6 +431,21 @@ impl Manager {
             for m in &spec.ports {
                 cmd.arg("-p").arg(format!("{}:{}", m.host, m.container));
             }
+        }
+        // A pod-mode stack service joins the stack's shared private network.
+        // The holder pid is looked up now (not persisted in the spec), so a
+        // service restarted after a down/up joins the *current* holder.
+        if spec.pod {
+            let stack = spec.stack.as_deref().unwrap_or_default();
+            let record = myc_run::pod::load(&self.store_root, stack)
+                .filter(myc_run::pod::alive)
+                .ok_or_else(|| {
+                    format!(
+                        "the private network of stack '{stack}' is not running — \
+                         start the whole stack again"
+                    )
+                })?;
+            cmd.arg("--join-net").arg(record.pid.to_string());
         }
         cmd.arg(&spec.manifest_id);
         if !spec.command.is_empty() {
@@ -740,6 +761,40 @@ impl Manager {
         Some(value)
     }
 
+    /// Make sure the stack's pod holder (its private network + the single
+    /// pasta instance publishing `ports`) is running; returns its pid.
+    ///
+    /// An already-running holder is reused as-is — its published ports were
+    /// fixed when it started, so port edits in the stack file take effect
+    /// on the next full stop/start (documented in `docs/web-api.md`).
+    pub fn ensure_pod(&self, stack: &str, ports: &[myc_run::PortMap]) -> Result<i32, String> {
+        if let Some(record) = myc_run::pod::load(&self.store_root, stack) {
+            if myc_run::pod::alive(&record) {
+                return Ok(record.pid);
+            }
+            myc_run::pod::remove(&self.store_root, stack); // stale
+        }
+        let holder =
+            myc_run::pod::spawn_holder(&self.exe, ports, false).map_err(|e| e.to_string())?;
+        myc_run::pod::save(&self.store_root, stack, &holder.record).map_err(|e| e.to_string())?;
+        // The holder is our child: park a thread on wait() so it never
+        // lingers as a zombie once stopped (or killed externally).
+        let mut child = holder.child;
+        std::thread::spawn(move || {
+            let _ = child.wait();
+        });
+        Ok(holder.record.pid)
+    }
+
+    /// Stop a stack's pod holder (if any) and drop its state record. The
+    /// attached pasta instance exits by itself once the namespace empties.
+    pub fn stop_pod(&self, stack: &str) {
+        if let Some(record) = myc_run::pod::load(&self.store_root, stack) {
+            myc_run::pod::stop_holder(&record);
+        }
+        myc_run::pod::remove(&self.store_root, stack);
+    }
+
     /// Drop exited registry entries for a stack service (before a restart,
     /// so the list doesn't fill with dead duplicates).
     pub fn prune_stack_service(&self, stack: &str, service: &str) {
@@ -1017,6 +1072,7 @@ mod tests {
             ports: Vec::new(),
             stack: None,
             service: None,
+            pod: false,
         }
     }
 

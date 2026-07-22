@@ -11,6 +11,7 @@ export default {
   data() {
     return {
       shareEnv: null,    // env being shared (ShareDialog open)
+      deployEnv: null,   // env being deployed (DeployDialog open)
       importOpen: false, // ImportDialog open
     };
   },
@@ -63,7 +64,7 @@ export default {
           <thead><tr>
             <th>App</th><th>Platform</th>
             <th class="num">Files</th><th class="num">Size</th>
-            <th class="ctr">Pinned</th><th></th><th></th>
+            <th class="ctr">Pinned</th><th></th><th></th><th></th>
           </tr></thead>
           <tbody>
             <tr v-for="e in S.envs" :key="e.id" class="click" @click="open(e)">
@@ -94,6 +95,13 @@ export default {
                 </button>
               </td>
               <td class="ctr" @click.stop>
+                <button class="iconbtn" @click="deployEnv = e" title="Deploy — put this app on your own server over ssh">
+                  <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4">
+                    <path d="M8 10V2.5m0 0L5 5.5m3-3 3 3M3 10.5v1.5a1.5 1.5 0 0 0 1.5 1.5h7a1.5 1.5 0 0 0 1.5-1.5v-1.5"/>
+                  </svg>
+                </button>
+              </td>
+              <td class="ctr" @click.stop>
                 <button class="iconbtn danger" @click="remove(e)" title="Remove from library">
                   <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4">
                     <path d="M3 4.5h10M6.5 4.5v-1a1 1 0 0 1 1-1h1a1 1 0 0 1 1 1v1M5 4.5l.6 8a1 1 0 0 0 1 .9h2.8a1 1 0 0 0 1-.9l.6-8"/>
@@ -108,6 +116,7 @@ export default {
     </template>
 
     <share-dialog v-if="shareEnv" :env="shareEnv" @close="shareEnv = null"></share-dialog>
+    <deploy-dialog v-if="deployEnv" :env="deployEnv" @close="deployEnv = null"></deploy-dialog>
     <import-dialog v-if="importOpen" @close="importOpen = false"></import-dialog>
   </section>`,
 };

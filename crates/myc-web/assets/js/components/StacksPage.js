@@ -81,7 +81,9 @@ export default {
         <template v-else>
           <status-dot :kind="dotKind(s)" :live="s.running > 0 && s.running === s.services"></status-dot>
           <div class="info">
-            <div class="nm"><a :href="'#stack/' + encodeURIComponent(s.name)">{{ s.name }}</a></div>
+            <div class="nm"><a :href="'#stack/' + encodeURIComponent(s.name)">{{ s.name }}</a>
+              <span v-if="s.network === 'pod'" class="pill teal" title="the apps of this stack share one private network">private network</span>
+            </div>
             <div class="im">{{ s.services }} app{{ s.services === 1 ? '' : 's' }} · {{ s.running }} running</div>
           </div>
           <div class="row">

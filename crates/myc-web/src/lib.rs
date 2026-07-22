@@ -11,6 +11,7 @@
 //! under `<store>/stacks/` (see [`stacks`]).
 
 mod containers;
+mod deploy;
 mod metrics;
 mod share;
 mod stacks;
@@ -44,6 +45,8 @@ struct App {
     jobs: Arc<Mutex<HashMap<u64, Job>>>,
     next_job: Arc<AtomicU64>,
     manager: Arc<containers::Manager>,
+    deploy_jobs: Arc<Mutex<HashMap<u64, deploy::DeployJob>>>,
+    next_deploy: Arc<AtomicU64>,
 }
 
 #[derive(Clone, Serialize)]
@@ -372,7 +375,13 @@ async fn which(State(app): State<App>, Query(params): Query<WhichParams>) -> Api
 async fn gc(State(app): State<App>) -> ApiResult {
     blocking(move || {
         let store = open_store(&app.root)?;
-        let (deleted, freed) = store.gc().map_err(internal)?;
+        let (deleted, freed) = store.gc().map_err(|e| match e {
+            // Not a server fault: another process is writing to the store
+            // right now (ingest, container starting). 409 keeps the UI
+            // message accurate ("try again"), and the spinner ends.
+            myc_store::StoreError::Busy => ApiError(StatusCode::CONFLICT, e.to_string()),
+            other => internal(other),
+        })?;
         Ok(Json(json!({ "deleted": deleted, "freed_bytes": freed })))
     })
     .await
@@ -910,6 +919,7 @@ async fn start_container(
             ports: plan.ports,
             stack: None,
             service: None,
+            pod: false,
         };
         let id = app.manager.start(spec).map_err(internal)?;
         let mut container = app
@@ -1078,6 +1088,10 @@ async fn list_stacks(State(app): State<App>) -> ApiResult {
                         "name": name,
                         "services": project.services.len(),
                         "running": running,
+                        "network": match project.network.mode {
+                            myc_compose::NetworkMode::Pod => "pod",
+                            myc_compose::NetworkMode::Host => "host",
+                        },
                         "images": project.services.values().map(|s| s.image.clone()).collect::<Vec<_>>(),
                     }));
                 }
@@ -1089,15 +1103,58 @@ async fn list_stacks(State(app): State<App>) -> ApiResult {
     .await
 }
 
+/// The stack's published ports (pod mode) as runtime port maps. The file
+/// was validated on save, but revalidate here so a hand-edited file fails
+/// with a clear message instead of a panic.
+fn pod_ports(project: &myc_compose::ProjectFile) -> Result<Vec<myc_run::PortMap>, ApiError> {
+    Ok(project
+        .network
+        .parsed_ports()
+        .map_err(|e| bad_request(e.to_string()))?
+        .into_iter()
+        .map(|(host, container)| myc_run::PortMap { host, container })
+        .collect())
+}
+
+/// Plain-language note when a pod-mode stack falls back to host networking
+/// because pasta is missing (the stack still starts — no dead end).
+const POD_FALLBACK_NOTE: &str =
+    "This stack asks for its own private network, but the 'passt' package is \
+     not installed — its apps are sharing this computer's network instead. \
+     To enable private networks: sudo apt install passt";
+
 fn stack_detail_json(app: &App, name: &str) -> Result<Value, ApiError> {
     let (project, text) = stacks::load_stack(&app.root, name).map_err(not_found)?;
     let order = project.start_order().map_err(internal)?;
     let store = open_store(&app.root)?;
+    let pod_mode = project.network.mode == myc_compose::NetworkMode::Pod;
+    let ports: Vec<myc_run::PortMap> = if pod_mode {
+        pod_ports(&project).unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    let pod_active = pod_mode
+        && myc_run::pod::load(&app.root, name)
+            .map(|r| myc_run::pod::alive(&r))
+            .unwrap_or(false);
     let services: Vec<Value> = order
         .iter()
         .map(|svc_name| {
             let svc = &project.services[svc_name];
-            let installed = resolve_installed(&store, &svc.image).is_ok();
+            let installed_id = resolve_installed(&store, &svc.image).ok();
+            // Ports this service is expected to serve (the image's declared
+            // ExposedPorts) that the pod actually publishes to the host —
+            // lets the UI say "web on localhost:8080" vs "internal only".
+            let exposed: Vec<u16> = installed_id
+                .as_ref()
+                .and_then(|id| store.get_manifest(id).ok())
+                .map(|m| m.config.exposed_ports.clone())
+                .unwrap_or_default();
+            let published: Vec<Value> = ports
+                .iter()
+                .filter(|p| exposed.contains(&p.container))
+                .map(|p| json!({ "host": p.host, "container": p.container }))
+                .collect();
             json!({
                 "name": svc_name,
                 "image": svc.image,
@@ -1105,7 +1162,8 @@ fn stack_detail_json(app: &App, name: &str) -> Result<Value, ApiError> {
                 "env": svc.env,
                 "depends_on": svc.depends_on,
                 "workdir": svc.workdir,
-                "installed": installed,
+                "installed": installed_id.is_some(),
+                "published": published,
                 "state": app.manager.stack_service_state(name, svc_name),
             })
         })
@@ -1114,6 +1172,14 @@ fn stack_detail_json(app: &App, name: &str) -> Result<Value, ApiError> {
         "name": name,
         "toml": text,
         "order": order,
+        "network": {
+            "mode": if pod_mode { "pod" } else { "host" },
+            "ports": ports.iter()
+                .map(|p| json!({ "host": p.host, "container": p.container }))
+                .collect::<Vec<_>>(),
+            "active": pod_active,
+            "available": network_isolation_available(),
+        },
         "services": services,
     }))
 }
@@ -1157,11 +1223,13 @@ async fn save_stack(
 async fn delete_stack(State(app): State<App>, UrlPath(name): UrlPath<String>) -> ApiResult {
     check_stack_name(&name)?;
     blocking(move || {
-        // Stop anything the stack is running, then delete its directory.
+        // Stop anything the stack is running (its private network included),
+        // then delete its directory.
         for id in app.manager.stack_containers(&name, None) {
             let _ = app.manager.stop(&id);
             let _ = app.manager.remove(&id);
         }
+        app.manager.stop_pod(&name);
         stacks::delete_stack(&app.root, &name).map_err(not_found)?;
         Ok(Json(json!({ "deleted": name })))
     })
@@ -1198,6 +1266,26 @@ async fn stack_up(State(app): State<App>, UrlPath(name): UrlPath<String>) -> Api
             ));
         }
 
+        // Pod mode: make sure the stack's private network is up before any
+        // service starts — a durable holder process owns the namespaces and
+        // one pasta instance publishes the [network] ports. Without pasta
+        // the stack still starts, on the host network, and the response
+        // carries a plain-language note instead of failing.
+        let pod_requested = project.network.mode == myc_compose::NetworkMode::Pod;
+        let mut network_note: Option<String> = None;
+        let mut pod = false;
+        if pod_requested {
+            if network_isolation_available() {
+                let ports = pod_ports(&project)?;
+                app.manager
+                    .ensure_pod(&name, &ports)
+                    .map_err(|e| ApiError(StatusCode::CONFLICT, e))?;
+                pod = true;
+            } else {
+                network_note = Some(POD_FALLBACK_NOTE.to_string());
+            }
+        }
+
         let stack_base = stacks::stack_dir(&app.root, &name);
         let mut started = Vec::new();
         let mut skipped = Vec::new();
@@ -1214,9 +1302,14 @@ async fn stack_up(State(app): State<App>, UrlPath(name): UrlPath<String>) -> Api
             }
             app.manager.prune_stack_service(&name, svc_name);
             let manifest = store.get_manifest(&resolved[svc_name]).ok();
+            // Pod services bind inside their own namespace, so the host's
+            // listening sockets are irrelevant to them.
             if let Some(m) = &manifest {
-                check_ports_free(m, None)
-                    .map_err(|e| ApiError(e.0, format!("cannot start '{svc_name}': {}", e.1)))?;
+                if !pod {
+                    check_ports_free(m, None).map_err(|e| {
+                        ApiError(e.0, format!("cannot start '{svc_name}': {}", e.1))
+                    })?;
+                }
             }
             let created_for = format!("stack {name}/{svc_name}");
             let mut binds = Vec::new();
@@ -1253,13 +1346,19 @@ async fn stack_up(State(app): State<App>, UrlPath(name): UrlPath<String>) -> Api
                 ports: Vec::new(),
                 stack: Some(name.clone()),
                 service: Some(svc_name.clone()),
+                pod,
             };
             app.manager.start(spec).map_err(internal)?;
             started.push(svc_name.clone());
         }
-        Ok(Json(
-            json!({ "started": started, "already_running": skipped }),
-        ))
+        let mut response = json!({ "started": started, "already_running": skipped });
+        if let Some(note) = network_note {
+            response
+                .as_object_mut()
+                .expect("response is an object")
+                .insert("network_note".into(), json!(note));
+        }
+        Ok(Json(response))
     })
     .await
 }
@@ -1275,6 +1374,9 @@ async fn stack_down(State(app): State<App>, UrlPath(name): UrlPath<String>) -> A
                 }
             }
         }
+        // Down means down: the private network (holder + pasta) has no
+        // reason to outlive the services. No-op for host-network stacks.
+        app.manager.stop_pod(&name);
         Ok(Json(json!({ "stopped": stopped })))
     })
     .await
@@ -1300,8 +1402,20 @@ async fn stack_restart_service(
         let store = open_store(&app.root)?;
         let manifest_id = resolve_installed(&store, &service.image)?;
         let manifest = store.get_manifest(&manifest_id).ok();
+        // Same network decision as stack_up: keep (or revive) the stack's
+        // private network when the file asks for it and pasta is there.
+        let mut pod = false;
+        if project.network.mode == myc_compose::NetworkMode::Pod && network_isolation_available() {
+            let ports = pod_ports(&project)?;
+            app.manager
+                .ensure_pod(&name, &ports)
+                .map_err(|e| ApiError(StatusCode::CONFLICT, e))?;
+            pod = true;
+        }
         if let Some(m) = &manifest {
-            check_ports_free(m, None)?;
+            if !pod {
+                check_ports_free(m, None)?;
+            }
         }
         let container_name = service
             .hostname
@@ -1335,6 +1449,7 @@ async fn stack_restart_service(
             ports: Vec::new(),
             stack: Some(name.clone()),
             service: Some(svc.clone()),
+            pod,
         };
         let id = app.manager.start(spec).map_err(internal)?;
         let container = app
@@ -1360,6 +1475,8 @@ pub fn serve(store_root: PathBuf, port: u16) -> anyhow::Result<()> {
         jobs: Arc::new(Mutex::new(HashMap::new())),
         next_job: Arc::new(AtomicU64::new(1)),
         manager: Arc::new(manager),
+        deploy_jobs: Arc::new(Mutex::new(HashMap::new())),
+        next_deploy: Arc::new(AtomicU64::new(1)),
     };
 
     let router = Router::new()
@@ -1381,6 +1498,9 @@ pub fn serve(store_root: PathBuf, port: u16) -> anyhow::Result<()> {
         .route("/api/capabilities", get(capabilities))
         .route("/api/ingest", post(ingest))
         .route("/api/export/{reference}", get(share::export_env))
+        .route("/api/export-oci/{reference}", get(share::export_oci))
+        .route("/api/deploy", post(deploy::start_deploy))
+        .route("/api/deploy/{id}", get(deploy::deploy_status))
         .route(
             "/api/import",
             post(share::import_upload).layer(axum::extract::DefaultBodyLimit::max(

@@ -23,6 +23,7 @@ import Sparkline from "./components/Sparkline.js";
 import ContainerExpansion from "./components/ContainerExpansion.js";
 import StartDialog from "./components/StartDialog.js";
 import ShareDialog from "./components/ShareDialog.js";
+import DeployDialog from "./components/DeployDialog.js";
 import ImportDialog from "./components/ImportDialog.js";
 
 import AppsPage from "./components/AppsPage.js";
@@ -57,6 +58,7 @@ app.component("spark-line", Sparkline);
 app.component("container-expansion", ContainerExpansion);
 app.component("start-dialog", StartDialog);
 app.component("share-dialog", ShareDialog);
+app.component("deploy-dialog", DeployDialog);
 app.component("import-dialog", ImportDialog);
 
 app.component("apps-page", AppsPage);
