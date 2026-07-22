@@ -22,8 +22,11 @@ echo "== named volumes: write, stop, run again, data still there =="
 "$MYC" run -v e2edata:/data alpine:3.20 -- /bin/sh -c 'echo persisted > /data/witness'
 out="$("$MYC" run -v e2edata:/data alpine:3.20 -- /bin/cat /data/witness)"
 [ "$out" = "persisted" ] || { echo "volume did not persist: $out"; exit 1; }
+# Capture before grepping: `grep -q` exits at the first match and, under
+# pipefail, the resulting EPIPE in myc would fail the pipeline spuriously.
 "$MYC" volume ls | grep -q e2edata || { echo "volume ls missing e2edata"; exit 1; }
-"$MYC" volume inspect e2edata | grep -q "path:" \
+inspect_out="$("$MYC" volume inspect e2edata)"
+echo "$inspect_out" | grep -q "path:" \
   || { echo "volume inspect has no path"; exit 1; }
 "$MYC" volume rm e2edata
 "$MYC" volume ls | grep -q e2edata && { echo "volume rm left e2edata"; exit 1; }

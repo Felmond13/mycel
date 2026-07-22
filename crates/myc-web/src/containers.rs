@@ -173,7 +173,11 @@ impl LogSink {
             return; // over cap: keep draining the pipe, drop the bytes
         }
         let mut file = self.file.lock().unwrap();
-        if before + chunk.len() as u64 > LOG_CAP_BYTES {
+        // `>=`, not `>`: when a chunk ends exactly on the cap (easy with
+        // power-of-two read sizes against a power-of-two cap), the next
+        // chunk is dropped by the guard above and the marker would never
+        // be written.
+        if before + chunk.len() as u64 >= LOG_CAP_BYTES {
             let keep = (LOG_CAP_BYTES - before) as usize;
             let _ = file.write_all(&chunk[..keep]);
             let _ = file.write_all(b"\n[log truncated: 2 MiB cap reached]\n");
