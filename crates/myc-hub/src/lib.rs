@@ -25,6 +25,7 @@
 
 pub mod client;
 pub mod deploy;
+pub mod remote;
 pub mod server;
 pub mod transfer;
 
