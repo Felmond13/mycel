@@ -860,7 +860,7 @@ dependencies = [
 
 [[package]]
 name = "myc-backend"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "hex",
  "myc-manifest",
@@ -873,7 +873,7 @@ dependencies = [
 
 [[package]]
 name = "myc-build"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "blake3",
  "myc-manifest",
@@ -887,7 +887,7 @@ dependencies = [
 
 [[package]]
 name = "myc-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -908,7 +908,7 @@ dependencies = [
 
 [[package]]
 name = "myc-compose"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "myc-manifest",
  "myc-oci",
@@ -922,7 +922,7 @@ dependencies = [
 
 [[package]]
 name = "myc-hub"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -940,7 +940,7 @@ dependencies = [
 
 [[package]]
 name = "myc-lazy"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "fuser",
@@ -955,7 +955,7 @@ dependencies = [
 
 [[package]]
 name = "myc-manifest"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "blake3",
  "hex",
@@ -966,7 +966,7 @@ dependencies = [
 
 [[package]]
 name = "myc-oci"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "flate2",
  "hex",
@@ -984,7 +984,7 @@ dependencies = [
 
 [[package]]
 name = "myc-query"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "myc-manifest",
  "myc-oci",
@@ -998,7 +998,7 @@ dependencies = [
 
 [[package]]
 name = "myc-run"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "libc",
  "myc-manifest",
@@ -1012,7 +1012,7 @@ dependencies = [
 
 [[package]]
 name = "myc-store"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "blake3",
  "flate2",
@@ -1028,7 +1028,7 @@ dependencies = [
 
 [[package]]
 name = "myc-web"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "axum",
