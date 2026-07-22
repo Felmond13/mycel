@@ -83,6 +83,10 @@ enum Command {
         /// Default with --net isolated: the image's exposed ports.
         #[arg(short = 'p', long = "publish")]
         publish: Vec<String>,
+        /// (internal) Join the user+network namespaces of this pod-holder
+        /// process (stacks in pod mode) instead of creating fresh ones.
+        #[arg(long, hide = true)]
+        join_net: Option<i32>,
         /// Deprecated alias of `--net none`
         #[arg(long, hide = true)]
         isolated_network: bool,
@@ -161,6 +165,26 @@ enum Command {
         /// Project file (default: ./mycel.toml)
         #[arg(short, long, default_value = "mycel.toml")]
         file: std::path::PathBuf,
+        /// Override the project's network mode: `pod` gives the whole stack
+        /// one private network (services meet on localhost, only the ports
+        /// from [network] are published), `host` shares this machine's
+        /// network (the default when the file has no [network] section)
+        #[arg(long)]
+        net: Option<String>,
+    },
+    /// Clean up a stack's private network (pod holder + pasta)
+    Down {
+        /// Project file (default: ./mycel.toml)
+        #[arg(short, long, default_value = "mycel.toml")]
+        file: std::path::PathBuf,
+    },
+    /// (internal) The pod-holder process: owns a stack's private network
+    /// namespaces and sleeps until killed
+    #[command(name = "_pod-holder", hide = true)]
+    PodHolder {
+        /// Die automatically when the process that spawned us dies
+        #[arg(long)]
+        die_with_parent: bool,
     },
     /// Verify the integrity of every blob referenced by a manifest
     Verify { reference: String },
@@ -308,6 +332,7 @@ fn main() {
             workdir,
             net,
             publish,
+            join_net,
             isolated_network,
             keep_rootfs,
             lazy,
@@ -350,6 +375,7 @@ fn main() {
                         workdir,
                         net,
                         publish,
+                        join_net,
                         keep_rootfs,
                         run_dir,
                         map_user,
@@ -383,7 +409,11 @@ fn main() {
             }
         }
         Command::Import { archive } => commands::import(&store_root, &archive),
-        Command::Up { file } => commands::up(&store_root, &file),
+        Command::Up { file, net } => commands::up(&store_root, &file, net.as_deref()),
+        Command::Down { file } => commands::down(&store_root, &file),
+        Command::PodHolder { die_with_parent } => {
+            std::process::exit(myc_run::pod::holder_main(die_with_parent))
+        }
         Command::Verify { reference } => commands::verify(&store_root, &reference),
         Command::Diff { a, b } => commands::diff(&store_root, &a, &b),
         Command::Which { query } => commands::which(&store_root, &query),

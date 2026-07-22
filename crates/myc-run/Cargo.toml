@@ -9,6 +9,8 @@ license.workspace = true
 myc-manifest = { workspace = true }
 myc-store = { workspace = true }
 thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 nix = { workspace = true }

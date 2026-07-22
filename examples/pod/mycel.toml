@@ -1,0 +1,31 @@
+# A two-service stack living in its own private network ("pod" mode).
+#
+# The services see each other on localhost — the web service reaches redis
+# at 127.0.0.1:6379 without redis ever being reachable from the machine —
+# and only the ports listed under [network] are published to the host.
+#
+# Run with:      myc up -f examples/pod/mycel.toml
+# Then visit:    http://localhost:8080   (each request shows redis's answer)
+# Clean up after a brutal stop (Ctrl-C cleans up by itself):
+#                myc down -f examples/pod/mycel.toml
+#
+# Requires the `passt` package (pasta) for the private network; without it
+# the stack still starts, on the host network, with a warning.
+
+[project]
+name = "poddemo"
+
+[network]
+mode = "pod"
+ports = ["8080"]        # "HOST" or "HOST:CONTAINER" — redis's 6379 stays internal
+
+[services.cache]
+image = "redis:7-alpine"
+
+[services.web]
+image = "alpine:3.20"
+depends_on = ["cache"]
+command = [
+  "/bin/sh", "-c",
+  "while true; do printf 'HTTP/1.1 200 OK\\r\\n\\r\\nredis says: %s\\n' \"$(printf 'PING\\r\\n' | nc 127.0.0.1 6379 | tr -d '\\r+')\" | nc -l -p 8080; done",
+]

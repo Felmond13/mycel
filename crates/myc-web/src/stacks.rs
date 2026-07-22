@@ -126,6 +126,9 @@ pub fn project_from_services(
         project: ProjectMeta {
             name: name.to_string(),
         },
+        // The visual builder has no network form yet: stacks it creates use
+        // host networking; pod mode is set through the raw-TOML editor.
+        network: myc_compose::NetworkConfig::default(),
         services,
     };
     project.validate().map_err(|e| e.to_string())?;

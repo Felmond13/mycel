@@ -36,6 +36,13 @@ pub fn run_linux(
 ) -> Result<i32> {
     let rootfs = work_dir.join("rootfs");
     materialize(store, manifest, &rootfs)?;
+    // The rootfs is fully hardlinked now; the store is not needed while the
+    // container runs. Release the shared inter-process lock so a container
+    // that runs for hours does not block `myc gc` (which needs the lock
+    // exclusively) the whole time. GC cannot hurt this container: its blobs
+    // stay alive through the rootfs hardlinks, manifests are never GC'd, and
+    // volume data lives outside `objects/`.
+    store.release_lock()?;
     let code = exec_rootfs(manifest, &rootfs, options, command)?;
     if !options.keep_rootfs {
         remove_rootfs(&rootfs)?;
@@ -63,6 +70,16 @@ pub fn exec_rootfs(
         ),
         _ => None,
     };
+    // Joining a pod: fail before any fork if the holder is already gone,
+    // with a message that says what to do about it.
+    if let crate::Network::Join { pid } = options.network {
+        if !Path::new(&format!("/proc/{pid}/ns/net")).exists() {
+            return Err(RunError::Setup(format!(
+                "the stack's private network is gone (holder process {pid} is \
+                 not running) — bring the stack down and up again"
+            )));
+        }
+    }
     // Ports to publish: the explicit mappings, or — when none were given —
     // the manifest's exposed ports on the same host ports.
     let publish: Vec<crate::PortMap> = match &options.network {
@@ -93,11 +110,12 @@ pub fn exec_rootfs(
 
     // Multi-uid mapping (see module docs of `subids`): only attempted for
     // the default root mapping — an explicit --map-user keeps the exact
-    // single-uid semantics it always had.
-    let subids = if options.map_uid == 0 && options.map_gid == 0 {
-        detect_subid_maps()
-    } else {
-        None
+    // single-uid semantics it always had. A container joining a pod uses
+    // the holder's already-written maps, so nothing to detect.
+    let subids = match &options.network {
+        crate::Network::Join { .. } => None,
+        _ if options.map_uid == 0 && options.map_gid == 0 => detect_subid_maps(),
+        _ => None,
     };
     // Handshake pipes for the parent-assisted setup: the child reports
     // "unshared" upward, the parent maps uids and/or attaches pasta to
@@ -190,13 +208,21 @@ fn child_main(
     outer_gid: u32,
     handshake: Option<(OwnedFd, OwnedFd)>,
 ) -> Result<i32> {
-    let mut flags = CloneFlags::CLONE_NEWUSER
-        | CloneFlags::CLONE_NEWNS
+    // A pod member joins the holder's user + network namespaces instead of
+    // creating its own: setns into the user namespace grants the full
+    // capability set there (we are its owner's uid), which is what lets
+    // the mount/pivot_root work below proceed rootless exactly as usual.
+    if let crate::Network::Join { pid } = options.network {
+        join_pod_namespaces(pid)?;
+    }
+    let mut flags = CloneFlags::CLONE_NEWNS
         | CloneFlags::CLONE_NEWPID
         | CloneFlags::CLONE_NEWUTS
         | CloneFlags::CLONE_NEWIPC;
-    if options.network != crate::Network::Host {
-        flags |= CloneFlags::CLONE_NEWNET;
+    match options.network {
+        crate::Network::Join { .. } => {} // user + net joined above
+        crate::Network::Host => flags |= CloneFlags::CLONE_NEWUSER,
+        _ => flags |= CloneFlags::CLONE_NEWUSER | CloneFlags::CLONE_NEWNET,
     }
     unshare(flags).map_err(|e| {
         setup_err(
@@ -231,7 +257,11 @@ fn child_main(
         None => false,
     };
 
-    if !mapped_by_parent {
+    // A joined user namespace already has its maps (written when the pod
+    // holder started) — there is nothing to map and the files could not be
+    // written a second time anyway.
+    let joined_pod = matches!(options.network, crate::Network::Join { .. });
+    if !mapped_by_parent && !joined_pod {
         // Fallback: map exactly one uid/gid ourselves (no helper needed).
         // The container then has a single user: the requested uid (root by
         // default). As the namespace creator we hold every capability in
@@ -355,8 +385,12 @@ fn container_init(
 
     // A fresh network namespace starts with loopback down — even
     // 127.0.0.1 is unreachable until someone brings it up. We own the
-    // namespace, so no privileges are needed.
-    if options.network != crate::Network::Host {
+    // namespace, so no privileges are needed. (A joined pod namespace was
+    // brought up by its holder; the host namespace is not ours to touch.)
+    if matches!(
+        options.network,
+        crate::Network::Loopback | crate::Network::Isolated { .. }
+    ) {
         set_loopback_up()?;
     }
 
@@ -492,9 +526,9 @@ fn prepare_rootfs_extras(rootfs: &Path, options: &RunOptions) -> Result<()> {
     let resolv: Option<Vec<u8>> = match &options.network {
         // Host network: the host's resolvers work as-is.
         crate::Network::Host => fs::read("/etc/resolv.conf").ok(),
-        // Isolated: pasta intercepts queries to the forward address and
-        // relays them to the host's first resolver.
-        crate::Network::Isolated { .. } => {
+        // Isolated or pod member: pasta intercepts queries to the forward
+        // address and relays them to the host's first resolver.
+        crate::Network::Isolated { .. } | crate::Network::Join { .. } => {
             Some(format!("nameserver {PASTA_DNS_FORWARD}\n").into_bytes())
         }
         // No connectivity, no resolver.
@@ -574,10 +608,46 @@ const RESULT_MAPPED: u8 = b'o';
 const RESULT_MAP_YOURSELF: u8 = b'f';
 const RESULT_NET_FAILED: u8 = b'x';
 
+/// Join the user + network namespaces of a pod holder. Must run in a
+/// single-threaded process (setns(CLONE_NEWUSER) refuses otherwise) —
+/// which the forked child is. Order matters: the user namespace first
+/// (it grants the capabilities), then the network namespace it owns.
+fn join_pod_namespaces(pid: i32) -> Result<()> {
+    let open = |kind: &str| {
+        fs::File::open(format!("/proc/{pid}/ns/{kind}")).map_err(|e| {
+            setup_err(
+                &format!("open the pod's {kind} namespace (holder pid {pid})"),
+                e,
+            )
+        })
+    };
+    let user = open("user")?;
+    let net = open("net")?;
+    nix::sched::setns(&user, CloneFlags::CLONE_NEWUSER)
+        .map_err(|e| setup_err("join the pod's user namespace", e))?;
+    nix::sched::setns(&net, CloneFlags::CLONE_NEWNET)
+        .map_err(|e| setup_err("join the pod's network namespace", e))?;
+    Ok(())
+}
+
+/// Write the uid/gid maps of a freshly unshared child from the parent
+/// side: the delegated subid ranges through newuidmap/newgidmap when
+/// available (uids beyond root exist in the namespace), the single-uid
+/// root map otherwise. Used for pod holders, whose namespaces every
+/// service of the stack inherits.
+pub(crate) fn map_child_ids(child: Pid) -> bool {
+    let outer_uid = nix::unistd::getuid().as_raw();
+    let outer_gid = nix::unistd::getgid().as_raw();
+    match detect_subid_maps() {
+        Some(maps) => apply_subid_maps(&maps, child, outer_uid, outer_gid),
+        None => write_single_maps_as(child, 0, 0, outer_uid, outer_gid),
+    }
+}
+
 /// Command line for attaching pasta to the namespaces of `child`.
 /// Published ports are TCP (the protocol OCI ExposedPorts overwhelmingly
 /// declare); an empty list opens nothing (outbound-only container).
-fn pasta_args(child: i32, publish: &[crate::PortMap]) -> Vec<String> {
+pub(crate) fn pasta_args(child: i32, publish: &[crate::PortMap]) -> Vec<String> {
     let mut args: Vec<String> = vec![
         "--config-net".into(),
         "--quiet".into(),
@@ -632,6 +702,22 @@ fn spawn_pasta(pasta: &Path, child: Pid, publish: &[crate::PortMap]) -> bool {
 /// child user namespace it created). Needed before pasta joins the user
 /// namespace, so pasta runs with a mapped identity.
 fn write_single_maps(child: Pid, options: &RunOptions, outer_uid: u32, outer_gid: u32) -> bool {
+    write_single_maps_as(
+        child,
+        options.map_uid,
+        options.map_gid,
+        outer_uid,
+        outer_gid,
+    )
+}
+
+fn write_single_maps_as(
+    child: Pid,
+    map_uid: u32,
+    map_gid: u32,
+    outer_uid: u32,
+    outer_gid: u32,
+) -> bool {
     let pid = child.as_raw();
     let write = |path: String, content: String| -> bool {
         fs::OpenOptions::new()
@@ -643,17 +729,17 @@ fn write_single_maps(child: Pid, options: &RunOptions, outer_uid: u32, outer_gid
     write(format!("/proc/{pid}/setgroups"), "deny".to_string())
         && write(
             format!("/proc/{pid}/uid_map"),
-            format!("{} {outer_uid} 1", options.map_uid),
+            format!("{map_uid} {outer_uid} 1"),
         )
         && write(
             format!("/proc/{pid}/gid_map"),
-            format!("{} {outer_gid} 1", options.map_gid),
+            format!("{map_gid} {outer_gid} 1"),
         )
 }
 
 /// Bring `lo` up inside the (already joined) network namespace, via the
 /// classic SIOCGIFFLAGS/SIOCSIFFLAGS ioctls — no netlink dependency.
-fn set_loopback_up() -> Result<()> {
+pub(crate) fn set_loopback_up() -> Result<()> {
     let err = |ctx: &str| setup_err(ctx, std::io::Error::last_os_error());
     unsafe {
         let fd = libc::socket(libc::AF_INET, libc::SOCK_DGRAM, 0);

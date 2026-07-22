@@ -1004,6 +1004,8 @@ dependencies = [
  "myc-manifest",
  "myc-store",
  "nix",
+ "serde",
+ "serde_json",
  "tempfile",
  "thiserror",
 ]

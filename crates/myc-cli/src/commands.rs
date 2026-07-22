@@ -243,6 +243,10 @@ pub struct RunArgs {
     pub net: String,
     /// `-p HOST:CONTAINER` publish specs (isolated mode only).
     pub publish: Vec<String>,
+    /// Join the user + network namespaces of this pod-holder process
+    /// (see `myc_run::pod`) instead of creating fresh ones. Used by
+    /// stacks in pod mode; incompatible with `--net`/`-p`.
+    pub join_net: Option<i32>,
     pub keep_rootfs: bool,
     /// Materialize into this caller-owned directory instead of a fresh temp
     /// dir. Used by the web UI, which cleans the directory up itself even
@@ -265,6 +269,7 @@ impl Default for RunArgs {
             workdir: None,
             net: "host".to_string(),
             publish: Vec::new(),
+            join_net: None,
             keep_rootfs: false,
             run_dir: None,
             map_user: None,
@@ -369,6 +374,15 @@ pub fn run(root: &Path, reference: &str, args: RunArgs) -> Result<i32> {
         Some(spec) => parse_map_user(spec)?,
         None => (0, 0),
     };
+    let network = match args.join_net {
+        Some(pid) => {
+            if args.net != "host" || !args.publish.is_empty() {
+                bail!("--join-net cannot be combined with --net or -p (the pod's network and published ports belong to its holder)");
+            }
+            myc_run::Network::Join { pid }
+        }
+        None => build_network(&args.net, &args.publish)?,
+    };
     let options = myc_run::RunOptions {
         command: args.command,
         env: args.env,
@@ -376,7 +390,7 @@ pub fn run(root: &Path, reference: &str, args: RunArgs) -> Result<i32> {
         binds,
         workdir: args.workdir,
         keep_rootfs: args.keep_rootfs,
-        network: build_network(&args.net, &args.publish)?,
+        network,
         map_uid,
         map_gid,
     };
@@ -676,7 +690,7 @@ pub fn verify(root: &Path, reference: &str) -> Result<i32> {
     }
 }
 
-pub fn up(root: &Path, file: &Path) -> Result<i32> {
+pub fn up(root: &Path, file: &Path, net: Option<&str>) -> Result<i32> {
     let store = open_store(root)?;
     let project = myc_compose::ProjectFile::load(file)?;
     let base = file.parent().unwrap_or(Path::new(".")).to_path_buf();
@@ -687,6 +701,14 @@ pub fn up(root: &Path, file: &Path) -> Result<i32> {
         project.project.name.clone()
     };
 
+    // Network mode: --net pod/host overrides the project file.
+    let pod_mode = match net {
+        Some("pod") => true,
+        Some("host") => false,
+        Some(other) => bail!("invalid --net '{other}' (expected pod or host)"),
+        None => project.network.mode == myc_compose::NetworkMode::Pod,
+    };
+
     // Resolve every image first (ingest what's missing) so startup is clean.
     for name in &order {
         let svc = &project.services[name];
@@ -694,10 +716,20 @@ pub fn up(root: &Path, file: &Path) -> Result<i32> {
             .with_context(|| format!("service '{name}': cannot resolve image '{}'", svc.image))?;
     }
 
+    // Pod mode: one holder process owns the stack's private network, one
+    // pasta instance publishes the project's ports, every service joins.
+    let mut holder = if pod_mode {
+        start_stack_pod(root, &project, &project_name, net == Some("pod"))?
+    } else {
+        None
+    };
+    let join_net = holder.as_ref().map(|h| h.record.pid);
+
     eprintln!("Starting {} service(s): {}", order.len(), order.join(", "));
 
     // One thread per service. Containers inherit our stdio; SIGINT reaches
-    // the whole foreground process group, stopping everything at once.
+    // the whole foreground process group (holder included), stopping
+    // everything at once.
     let mut handles = Vec::new();
     for name in &order {
         let svc = &project.services[name];
@@ -719,6 +751,7 @@ pub fn up(root: &Path, file: &Path) -> Result<i32> {
             workdir: svc.workdir.clone(),
             net: "host".to_string(),
             publish: Vec::new(),
+            join_net,
             keep_rootfs: false,
             run_dir: None,
             map_user: None,
@@ -743,7 +776,107 @@ pub fn up(root: &Path, file: &Path) -> Result<i32> {
             worst = code;
         }
     }
+
+    // Every service is done: the private network has no reason to outlive
+    // them. (If `up` dies brutally instead, the holder follows it via
+    // PR_SET_PDEATHSIG, and pasta exits when the namespace empties.)
+    if let Some(h) = &mut holder {
+        let _ = h.child.kill();
+        let _ = h.child.wait();
+        myc_run::pod::remove(root, &project_name);
+        eprintln!("Stack \"{project_name}\": private network closed.");
+    }
     Ok(worst)
+}
+
+/// Start the pod holder for `myc up`. When pasta is missing: a project
+/// file asking for pod mode falls back to host networking with a loud
+/// warning (the stack still runs), while an explicit `--net pod` fails
+/// with the install hint (the user asked for exactly that).
+fn start_stack_pod(
+    root: &Path,
+    project: &myc_compose::ProjectFile,
+    name: &str,
+    forced: bool,
+) -> Result<Option<myc_run::pod::HolderChild>> {
+    if myc_run::pasta_path().is_none() {
+        if forced {
+            bail!("{}", myc_run::NETWORK_ISOLATION_HINT);
+        }
+        eprintln!(
+            "myc: warning: this project asks for its own private network, but the \
+             'passt' package is missing — starting on the host network instead \
+             (services share this machine's ports). {}",
+            myc_run::NETWORK_ISOLATION_HINT
+        );
+        return Ok(None);
+    }
+    if let Some(record) = myc_run::pod::load(root, name) {
+        if myc_run::pod::alive(&record) {
+            bail!(
+                "stack \"{name}\" already has a private network running (holder pid {}) — \
+                 run `myc down` first",
+                record.pid
+            );
+        }
+        myc_run::pod::remove(root, name); // stale record from a brutal stop
+    }
+    let ports: Vec<myc_run::PortMap> = project
+        .network
+        .parsed_ports()?
+        .into_iter()
+        .map(|(host, container)| myc_run::PortMap { host, container })
+        .collect();
+    let exe = std::env::current_exe()?;
+    let holder = myc_run::pod::spawn_holder(&exe, &ports, true)?;
+    myc_run::pod::save(root, name, &holder.record)?;
+    if ports.is_empty() {
+        eprintln!(
+            "Stack \"{name}\" is running in its own private network — services reach \
+             each other on localhost; nothing is published to this machine."
+        );
+    } else {
+        let list: Vec<String> = ports
+            .iter()
+            .map(|p| {
+                if p.host == p.container {
+                    format!("localhost:{}", p.host)
+                } else {
+                    format!("localhost:{} → port {} inside", p.host, p.container)
+                }
+            })
+            .collect();
+        eprintln!(
+            "Stack \"{name}\" is running in its own private network — reachable from \
+             this machine: {}",
+            list.join(", ")
+        );
+    }
+    Ok(Some(holder))
+}
+
+/// `myc down`: stop the stack's private network (holder + pasta) and drop
+/// its state record. A foreground `myc up` cleans up after itself; this is
+/// for anything that ended less gracefully.
+pub fn down(root: &Path, file: &Path) -> Result<i32> {
+    let project = myc_compose::ProjectFile::load(file)?;
+    let name = if project.project.name.is_empty() {
+        "mycel".to_string()
+    } else {
+        project.project.name.clone()
+    };
+    match myc_run::pod::load(root, &name) {
+        None => println!("stack \"{name}\": nothing to clean up"),
+        Some(record) => {
+            if myc_run::pod::stop_holder(&record) {
+                println!("stack \"{name}\": private network stopped");
+            } else {
+                println!("stack \"{name}\": cleaned up a leftover network record");
+            }
+            myc_run::pod::remove(root, &name);
+        }
+    }
+    Ok(0)
 }
 
 /// `myc diff A B`: exact file-by-file comparison of two environments.

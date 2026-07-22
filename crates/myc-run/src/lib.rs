@@ -10,6 +10,7 @@
 #[cfg(target_os = "linux")]
 mod linux;
 mod materialize;
+pub mod pod;
 
 pub use materialize::{materialize, MaterializeStats};
 
@@ -44,7 +45,7 @@ pub type Result<T> = std::result::Result<T, RunError>;
 
 /// One published port: connections to `host` on the machine reach
 /// `container` inside the isolated network namespace.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PortMap {
     pub host: u16,
     pub container: u16,
@@ -64,6 +65,14 @@ pub enum Network {
     /// container. An empty list publishes the manifest's exposed ports
     /// on the same host ports.
     Isolated { publish: Vec<PortMap> },
+    /// Join the user + network namespaces of an existing process (a pod
+    /// holder, see [`pod`]) instead of creating fresh ones. The container
+    /// shares that process's private network — every service that joins the
+    /// same holder sees the others on localhost — and its user namespace,
+    /// whose uid/gid maps were written when the holder started
+    /// (`map_uid`/`map_gid` are therefore ignored). Connectivity and
+    /// published ports belong to the holder's single pasta instance.
+    Join { pid: i32 },
 }
 
 /// The message shown when isolation is requested but pasta is missing.
