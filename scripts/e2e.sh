@@ -310,13 +310,19 @@ EOF
     || { echo "myc down did not clean the stale record"; exit 1; }
 
   # Without pasta: --net pod fails with the install hint, while pod mode
-  # from the file falls back to the host network with a warning.
-  err="$(env PATH=/usr/bin:/bin HOME="$WORK" MYCEL_STORE="$WORK/store2" \
-    "$MYC" up -f "$POD_DIR/mycel.toml" --net pod 2>&1 || true)"
-  echo "$err" | grep -q "passt" || { echo "missing passt hint for --net pod: $err"; exit 1; }
-  out="$(env PATH=/usr/bin:/bin HOME="$WORK" MYCEL_STORE="$WORK/store2" \
-    "$MYC" up -f "$POD_DIR/mycel.toml" 2>&1 || true)"
-  echo "$out" | grep -q "host network instead" || { echo "missing pod fallback warning: $out"; exit 1; }
+  # from the file falls back to the host network with a warning. The
+  # simulation trims PATH to /usr/bin:/bin, so it only proves something
+  # when pasta lives elsewhere (on GitHub runners it is /usr/bin/pasta).
+  if [ ! -x /usr/bin/pasta ] && [ ! -x /bin/pasta ]; then
+    err="$(env PATH=/usr/bin:/bin HOME="$WORK" MYCEL_STORE="$WORK/store2" \
+      "$MYC" up -f "$POD_DIR/mycel.toml" --net pod 2>&1 || true)"
+    echo "$err" | grep -q "passt" || { echo "missing passt hint for --net pod: $err"; exit 1; }
+    out="$(env PATH=/usr/bin:/bin HOME="$WORK" MYCEL_STORE="$WORK/store2" \
+      "$MYC" up -f "$POD_DIR/mycel.toml" 2>&1 || true)"
+    echo "$out" | grep -q "host network instead" || { echo "missing pod fallback warning: $out"; exit 1; }
+  else
+    echo "pasta is in /usr/bin — skipping missing-pasta hint checks for pod mode"
+  fi
 else
   echo "pasta not installed — SKIPPING stack pod e2e (sudo apt install passt to enable)"
 fi
