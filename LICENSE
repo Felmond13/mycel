@@ -2,18 +2,27 @@ Business Source License 1.1
 
 Parameters
 
-Licensor:             Felmond13
+Licensor:             Noureddine BOUKADOUM
 
 Licensed Work:        Mycel (this repository)
-                      The Licensed Work is (c) 2026 Felmond13.
+                      The Licensed Work is (c) 2026 Noureddine BOUKADOUM.
 
-Additional Use Grant: You may use, copy, modify, and redistribute the
-                      Licensed Work for any purpose, provided that you may
-                      not offer the Licensed Work, or any work derived from
-                      it, to third parties as a commercial hosted service or
-                      as a commercial product that competes with any of the
-                      Licensor's offerings. Personal use, internal business
-                      use, and non-commercial use are unrestricted.
+Additional Use Grant: You may use, copy, and modify the Licensed Work for
+                      personal use and for internal, non-commercial use.
+                      You may fork the Licensed Work on GitHub solely to
+                      the extent strictly necessary to prepare and submit
+                      a contribution (such as a pull request) to the
+                      Licensor's official repository, and you may submit
+                      such contributions.
+
+                      Except as expressly permitted above, you may not
+                      redistribute, republish, or otherwise duplicate the
+                      Licensed Work or any work derived from it, in whole
+                      or in part, and you may not offer the Licensed Work,
+                      or any work derived from it, to third parties as a
+                      commercial product or hosted service, or as any
+                      product or service that competes with the Licensor's
+                      offerings.
 
 Change Date:          2030-07-22
 
@@ -21,6 +30,8 @@ Change License:       Apache License, Version 2.0
 
 For information about alternative licensing arrangements for the Licensed
 Work, please contact the Licensor.
+
+For a commercial license, contact: noureddine.boukadoum@gmail.com
 
 Notice
 

@@ -612,13 +612,18 @@ Not yet implemented (by design, in order):
 ## License
 
 Mycel is source-available under the [Business Source License 1.1](LICENSE)
-(SPDX: `BUSL-1.1`).
+(SPDX: `BUSL-1.1`), owned by **Noureddine BOUKADOUM**.
 
-In short: you may read, use, modify, and redistribute the code freely for
-personal use, internal business use, and any non-commercial purpose. What you
-may not do without a commercial license from the owner (Felmond13) is offer
-Mycel — or a derivative of it — as a commercial hosted service or commercial
-product that competes with the owner's offerings.
+In short: you may read, use, and modify the code freely for personal use and
+internal non-commercial use. What you may not do without a commercial license
+from the owner is redistribute, republish, or duplicate Mycel or a derivative
+of it (beyond the GitHub fork strictly needed to submit a contribution), or
+offer it as a commercial or competing product or service.
+
+Contributions are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md) (note: it
+includes an assignment of rights on contributions).
+
+For a commercial license, contact: **noureddine.boukadoum@gmail.com**.
 
 On the Change Date, **July 22, 2030**, all of this code automatically becomes
 available under the Apache License, Version 2.0.
