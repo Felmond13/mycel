@@ -93,8 +93,8 @@ but radically smaller because the guest only needs `myc`):
 - **Proxying**: identical UX to Windows — `myc` on macOS forwards commands
   to the twin over a vsock; `probe()` reports VM state with fix hints.
 - **Licensing note**: the Linux kernel is GPLv2. Distributing a pinned
-  kernel image alongside (not linked into) the Apache-2.0 `myc` binary is
-  fine, but the kernel config + sources (or an upstream source offer) must
+  kernel image alongside (not linked into) the BSL-1.1-licensed `myc` binary
+  is fine, but the kernel config + sources (or an upstream source offer) must
   ship with releases, and the kernel must stay a separate artifact rather
   than bytes embedded into the Mach-O binary.
 

@@ -611,4 +611,14 @@ Not yet implemented (by design, in order):
 
 ## License
 
-Apache-2.0
+Mycel is source-available under the [Business Source License 1.1](LICENSE)
+(SPDX: `BUSL-1.1`).
+
+In short: you may read, use, modify, and redistribute the code freely for
+personal use, internal business use, and any non-commercial purpose. What you
+may not do without a commercial license from the owner (Felmond13) is offer
+Mycel — or a derivative of it — as a commercial hosted service or commercial
+product that competes with the owner's offerings.
+
+On the Change Date, **July 22, 2030**, all of this code automatically becomes
+available under the Apache License, Version 2.0.
