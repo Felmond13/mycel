@@ -41,6 +41,10 @@ pub enum StoreError {
     HashMismatch { expected: String, actual: String },
     #[error("invalid volume name '{0}' (use 1-64 lowercase letters, digits, . _ -, starting with a letter or digit)")]
     InvalidVolumeName(String),
+    #[error(
+        "the store is busy (another process is writing to it right now) — try again in a moment"
+    )]
+    Busy,
     #[error("volume '{0}' not found (myc volume ls lists them)")]
     VolumeMissing(String),
     #[error(transparent)]
@@ -364,15 +368,57 @@ impl Store {
         Ok(out)
     }
 
+    /// Release this handle's inter-process lock early.
+    ///
+    /// A container holds its `Store` open for as long as it runs, but only
+    /// needs the store until its rootfs is materialized (hardlinks keep the
+    /// data alive regardless of what happens in the store afterwards).
+    /// Dropping the lock at that point keeps a long-running container from
+    /// blocking `gc` forever. After this call the handle must only be used
+    /// for reads that tolerate concurrent GC (blob paths already
+    /// hardlinked, volume paths, …).
+    pub fn release_lock(&self) -> Result<()> {
+        let lock_path = self.root.join("lock");
+        fs2::FileExt::unlock(&self._lock).map_err(|e| io_err(&lock_path, e))
+    }
+
     /// Delete every blob not referenced by any stored manifest.
     /// Returns (blobs deleted, bytes freed).
+    ///
+    /// Waits up to ~10 s for exclusive store access, then fails with
+    /// [`StoreError::Busy`] instead of blocking forever (an in-flight
+    /// ingest or a container still materializing holds the lock shared).
     pub fn gc(&self) -> Result<(u64, u64)> {
+        self.gc_with_wait(std::time::Duration::from_secs(10))
+    }
+
+    /// [`Store::gc`] with an explicit bound on how long to wait for the
+    /// exclusive lock.
+    pub fn gc_with_wait(&self, max_wait: std::time::Duration) -> Result<(u64, u64)> {
         // Upgrade to exclusive lock: no concurrent ingest/run during GC.
+        // fs2 cannot upgrade in place, so drop the shared lock first; the
+        // bounded retry loop (instead of a blocking lock_exclusive) is what
+        // keeps a stuck or long-lived shared holder from hanging us forever.
         let lock_path = self.root.join("lock");
         self._lock.unlock().map_err(|e| io_err(&lock_path, e))?;
-        self._lock
-            .lock_exclusive()
-            .map_err(|e| io_err(&lock_path, e))?;
+        let deadline = std::time::Instant::now() + max_wait;
+        loop {
+            match self._lock.try_lock_exclusive() {
+                Ok(()) => break,
+                Err(e) if e.kind() == fs2::lock_contended_error().kind() => {
+                    if std::time::Instant::now() >= deadline {
+                        // Give the shared lock back before reporting busy so
+                        // this handle stays in its normal locked state.
+                        self._lock
+                            .lock_shared()
+                            .map_err(|e| io_err(&lock_path, e))?;
+                        return Err(StoreError::Busy);
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+                Err(e) => return Err(io_err(&lock_path, e)),
+            }
+        }
 
         let mut live: HashSet<String> = HashSet::new();
         for (_, manifest) in self.list_manifests()? {
@@ -517,6 +563,39 @@ mod tests {
         assert_eq!(deleted, 1);
         assert!(store.has_blob(&live));
         assert!(!store.has_blob(&dead));
+    }
+
+    #[test]
+    fn gc_reports_busy_instead_of_blocking_when_store_is_held() {
+        let (_d, store) = temp_store();
+        store.put_blob(&mut &b"dead"[..]).unwrap();
+        // A second handle (another process in real life: an ingest, a
+        // container still materializing) holds the shared lock.
+        let holder = Store::open(store.root()).unwrap();
+        let err = store
+            .gc_with_wait(std::time::Duration::from_millis(200))
+            .unwrap_err();
+        assert!(matches!(err, StoreError::Busy), "got {err:?}");
+        // The handle recovered its shared lock and still works.
+        assert_eq!(store.blob_stats().unwrap().count, 1);
+        // Once the holder lets go, gc proceeds normally.
+        drop(holder);
+        let (deleted, _) = store.gc().unwrap();
+        assert_eq!(deleted, 1);
+    }
+
+    #[test]
+    fn release_lock_unblocks_gc_like_a_running_container() {
+        let (_d, store) = temp_store();
+        store.put_blob(&mut &b"dead"[..]).unwrap();
+        // Simulates a running container: its Store stays open for the whole
+        // run, but the lock is released right after materialization.
+        let runner = Store::open(store.root()).unwrap();
+        runner.release_lock().unwrap();
+        let (deleted, _) = store
+            .gc_with_wait(std::time::Duration::from_millis(200))
+            .unwrap();
+        assert_eq!(deleted, 1);
     }
 
     #[test]
