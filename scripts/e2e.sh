@@ -218,6 +218,109 @@ else
   echo "pasta not installed — SKIPPING network isolation e2e (sudo apt install passt to enable)"
 fi
 
+echo "== stack pod mode: internal localhost, published/unpublished ports, clean exit =="
+if command -v pasta >/dev/null 2>&1 || [ -x "$HOME/.local/bin/pasta" ]; then
+  POD_DIR="$WORK/podstack"
+  mkdir -p "$POD_DIR"
+  # server listens on the pod-internal 18086 (never published); client reaches
+  # it on the pod's OWN localhost, then serves the published 8085 to the host.
+  cat > "$POD_DIR/mycel.toml" <<'EOF'
+[project]
+name = "e2epod"
+
+[network]
+mode = "pod"
+ports = ["18085:8085"]
+
+[services.server]
+image = "alpine:3.20"
+command = ["/bin/sh", "-c", "echo pod-hello | nc -l -p 18086"]
+
+[services.client]
+image = "alpine:3.20"
+depends_on = ["server"]
+command = ["/bin/sh", "-c", "i=0; while [ $i -lt 100 ]; do out=$(nc 127.0.0.1 18086 2>/dev/null); if [ -n \"$out\" ]; then echo \"client-got: $out\"; echo pod-web-ok | nc -l -p 8085; exit 0; fi; i=$((i+1)); sleep 0.2; done; echo client-timeout; exit 1"]
+EOF
+  MYCEL_STORE="$WORK/store2" "$MYC" up -f "$POD_DIR/mycel.toml" > "$WORK/pod-up.log" 2>&1 &
+  POD_UP_PID=$!
+  # Service A joined service B on the pod's internal localhost.
+  internal_ok=""
+  for _ in $(seq 1 150); do
+    grep -q "client-got: pod-hello" "$WORK/pod-up.log" && internal_ok=1 && break
+    sleep 0.2
+  done
+  [ -n "$internal_ok" ] || { echo "pod internal localhost failed:"; cat "$WORK/pod-up.log"; exit 1; }
+  pgrep -f "_pod-holder" >/dev/null || { echo "no pod holder while the stack is up"; exit 1; }
+  # The unpublished internal port must NOT be reachable from the host.
+  if (exec 3<>/dev/tcp/127.0.0.1/18086) 2>/dev/null; then
+    echo "unpublished pod port 18086 is reachable from the host"; exit 1
+  fi
+  # The published port answers on the host.
+  pub_ok=""
+  for _ in $(seq 1 100); do
+    if out="$( (exec 3<>/dev/tcp/127.0.0.1/18085 && head -c 10 <&3) 2>/dev/null )" \
+       && [ "$out" = "pod-web-ok" ]; then pub_ok=1; break; fi
+    sleep 0.2
+  done
+  [ -n "$pub_ok" ] || { echo "published pod port 18085 not reachable"; cat "$WORK/pod-up.log"; exit 1; }
+  wait "$POD_UP_PID" || { echo "pod up exited non-zero"; cat "$WORK/pod-up.log"; exit 1; }
+  grep -q "private network" "$WORK/pod-up.log" \
+    || { echo "missing private-network message:"; cat "$WORK/pod-up.log"; exit 1; }
+  # `up` cleaned up after itself: no holder, no pasta, nothing for `myc down`.
+  # (pasta exits when the namespace empties, which can lag a little.)
+  pod_gone=""
+  for _ in $(seq 1 50); do
+    if ! pgrep -f "_pod-holder" >/dev/null && ! pgrep -f "18085:8085" >/dev/null; then
+      pod_gone=1; break
+    fi
+    sleep 0.2
+  done
+  [ -n "$pod_gone" ] || { echo "holder or pasta survived myc up"; pgrep -af "_pod-holder|18085:8085"; exit 1; }
+  MYCEL_STORE="$WORK/store2" "$MYC" down -f "$POD_DIR/mycel.toml" | grep -q "nothing to clean up" \
+    || { echo "myc down after a clean exit should have nothing to do"; exit 1; }
+
+  echo "== stack pod mode: a SIGKILLed up leaves no holder; myc down cleans the record =="
+  cat > "$POD_DIR/mycel.toml" <<'EOF'
+[project]
+name = "e2epod"
+
+[network]
+mode = "pod"
+
+[services.napper]
+image = "alpine:3.20"
+command = ["/bin/sleep", "2"]
+EOF
+  MYCEL_STORE="$WORK/store2" "$MYC" up -f "$POD_DIR/mycel.toml" > "$WORK/pod-kill.log" 2>&1 &
+  POD_KILL_PID=$!
+  # Wait for the holder AND its state record (written right after the
+  # network handshake) so the kill exercises the stale-record path.
+  for _ in $(seq 1 100); do
+    pgrep -f "_pod-holder" >/dev/null && [ -f "$WORK/store2/pods/e2epod.json" ] && break
+    sleep 0.1
+  done
+  pgrep -f "_pod-holder" >/dev/null || { echo "holder never appeared"; cat "$WORK/pod-kill.log"; exit 1; }
+  [ -f "$WORK/store2/pods/e2epod.json" ] || { echo "pod record never written"; cat "$WORK/pod-kill.log"; exit 1; }
+  kill -9 "$POD_KILL_PID"
+  wait "$POD_KILL_PID" 2>/dev/null || true
+  sleep 1
+  # PR_SET_PDEATHSIG: the holder must die with the up that spawned it.
+  pgrep -f "_pod-holder" >/dev/null && { echo "holder survived SIGKILL of myc up"; exit 1; }
+  MYCEL_STORE="$WORK/store2" "$MYC" down -f "$POD_DIR/mycel.toml" | grep -q "leftover" \
+    || { echo "myc down did not clean the stale record"; exit 1; }
+
+  # Without pasta: --net pod fails with the install hint, while pod mode
+  # from the file falls back to the host network with a warning.
+  err="$(env PATH=/usr/bin:/bin HOME="$WORK" MYCEL_STORE="$WORK/store2" \
+    "$MYC" up -f "$POD_DIR/mycel.toml" --net pod 2>&1 || true)"
+  echo "$err" | grep -q "passt" || { echo "missing passt hint for --net pod: $err"; exit 1; }
+  out="$(env PATH=/usr/bin:/bin HOME="$WORK" MYCEL_STORE="$WORK/store2" \
+    "$MYC" up -f "$POD_DIR/mycel.toml" 2>&1 || true)"
+  echo "$out" | grep -q "host network instead" || { echo "missing pod fallback warning: $out"; exit 1; }
+else
+  echo "pasta not installed — SKIPPING stack pod e2e (sudo apt install passt to enable)"
+fi
+
 echo "== hub: serve, pull into empty store, run =="
 HUB_PORT=9673
 MYCEL_STORE="$WORK/store2" "$MYC" hub serve --port "$HUB_PORT" &
@@ -389,6 +492,20 @@ for _ in $(seq 1 50); do
   sleep 0.2
 done
 [ -n "$proc_ok" ] || { echo "process list missing the sleep entrypoint"; exit 1; }
+
+echo "== ui v2: gc terminates (with stats) while a container is running =="
+# Regression test: a running container used to hold the store lock for its
+# whole life, so /api/gc blocked forever and the UI spinner never stopped.
+gc_json="$(curl -sf --max-time 30 -X POST "http://127.0.0.1:$UI2_PORT/api/gc")" \
+  || { echo "gc did not terminate while a container was running"; exit 1; }
+echo "$gc_json" | grep -q '"deleted":' || { echo "gc response missing stats: $gc_json"; exit 1; }
+echo "$gc_json" | grep -q '"freed_bytes":' || { echo "gc response missing stats: $gc_json"; exit 1; }
+# The running container survived the GC…
+curl -sf "http://127.0.0.1:$UI2_PORT/api/containers/$mid/processes" | grep -q '"name":"sleep"' \
+  || { echo "running container died during gc"; exit 1; }
+# …and the store is still fully intact.
+MYCEL_STORE="$WORK/store2" "$MYC" verify alpine:3.20 || { echo "store corrupt after gc"; exit 1; }
+
 curl -sf -X POST "http://127.0.0.1:$UI2_PORT/api/containers/$mid/stop" >/dev/null \
   || { echo "metrics container stop failed"; exit 1; }
 curl -sf -X DELETE "http://127.0.0.1:$UI2_PORT/api/containers/$mid" >/dev/null \
@@ -422,6 +539,43 @@ curl -sf -X POST "http://127.0.0.1:$UI2_PORT/api/stacks/e2e-stack/down" >/dev/nu
   || { echo "stack down failed"; exit 1; }
 curl -sf -X DELETE "http://127.0.0.1:$UI2_PORT/api/stacks/e2e-stack" | grep -q '"deleted"' \
   || { echo "stack delete failed"; exit 1; }
+
+if command -v pasta >/dev/null 2>&1 || [ -x "$HOME/.local/bin/pasta" ]; then
+  echo "== ui v2: pod-mode stack via the API =="
+  curl -sf -X PUT -H 'Content-Type: application/json' \
+    -d '{"toml":"[project]\nname = \"e2e-pod\"\n\n[network]\nmode = \"pod\"\nports = [\"18087:8087\"]\n\n[services.web]\nimage = \"alpine:3.20\"\ncommand = [\"/bin/sh\", \"-c\", \"echo ui-pod-ok | nc -l -p 8087\"]\n"}' \
+    "http://127.0.0.1:$UI2_PORT/api/stacks/e2e-pod" | grep -q '"e2e-pod"' \
+    || { echo "pod stack save failed"; exit 1; }
+  curl -sf "http://127.0.0.1:$UI2_PORT/api/stacks/e2e-pod" | grep -q '"mode":"pod"' \
+    || { echo "pod stack detail missing network mode"; exit 1; }
+  curl -sf -X POST "http://127.0.0.1:$UI2_PORT/api/stacks/e2e-pod/up" | grep -q '"started"' \
+    || { echo "pod stack up failed"; exit 1; }
+  pgrep -f "_pod-holder" >/dev/null || { echo "no holder for the ui pod stack"; exit 1; }
+  ui_pod_ok=""
+  for _ in $(seq 1 100); do
+    if out="$( (exec 3<>/dev/tcp/127.0.0.1/18087 && head -c 9 <&3) 2>/dev/null )" \
+       && [ "$out" = "ui-pod-ok" ]; then ui_pod_ok=1; break; fi
+    sleep 0.2
+  done
+  [ -n "$ui_pod_ok" ] || { echo "ui pod published port not answering"; exit 1; }
+  # The service's container reports the pod network.
+  curl -sf "http://127.0.0.1:$UI2_PORT/api/stacks/e2e-pod" | grep -q '"network":"pod"' \
+    || { echo "pod service state missing network=pod"; exit 1; }
+  curl -sf -X POST "http://127.0.0.1:$UI2_PORT/api/stacks/e2e-pod/down" >/dev/null \
+    || { echo "pod stack down failed"; exit 1; }
+  ui_pod_gone=""
+  for _ in $(seq 1 50); do
+    if ! pgrep -f "_pod-holder" >/dev/null && ! pgrep -f "18087:8087" >/dev/null; then
+      ui_pod_gone=1; break
+    fi
+    sleep 0.2
+  done
+  [ -n "$ui_pod_gone" ] || { echo "holder or pasta survived stack down"; pgrep -af "_pod-holder|18087:8087"; exit 1; }
+  curl -sf -X DELETE "http://127.0.0.1:$UI2_PORT/api/stacks/e2e-pod" | grep -q '"deleted"' \
+    || { echo "pod stack delete failed"; exit 1; }
+else
+  echo "pasta not installed — SKIPPING ui pod stack e2e"
+fi
 kill "$UI2_PID" 2>/dev/null
 
 echo "ALL E2E TESTS PASSED"

@@ -161,11 +161,18 @@ who has never touched a terminal can use containers:
   GHCR, Quay…); Mycel stores it its own way: deduplicated,
   content-addressed files, not images.
 - **Library** — the software installed locally: file trees, SBOMs, run
-  commands, pin/remove.
+  commands, pin/remove. Each app can be shared (as a portable `.mycel`
+  file, as a standard Docker image that `docker load` and any cloud
+  accept, or through a hub) and **deployed to your own server** in one
+  dialog — type `user@host`, only the missing files travel, and the app
+  can be started there right away (the web face of `myc deploy`).
 - **Stacks** — orchestration from the browser: build a multi-service
   project with a form (apps, env vars, start-after dependencies), no TOML
   in sight unless you flip the "Advanced" toggle. Stacks are plain
   `mycel.toml` files under `~/.mycel/stacks/`, started in dependency order.
+  A stack with `[network] mode = "pod"` gets a "private network" badge: its
+  apps meet on localhost, only the listed ports are reachable from the
+  computer, and unexposed services read "internal only".
 - **Advanced** — the power-user pages: store-wide dedup visualization,
   file-level compare, reverse file search, doctor.
 
@@ -465,6 +472,48 @@ binds = ["./data:/var/lib/app"]
 myc up            # resolves images, starts in dependency order, foreground
 ```
 
+### Give the stack its own private network ("pod" mode)
+
+By default services share the host network. Add a `[network]` section and
+the whole stack lives in its own little machine instead: services talk to
+each other on **localhost** (the api reaches postgres at `127.0.0.1:5432`
+with zero configuration), and the host only sees the ports you list —
+everything else is unreachable from outside:
+
+```toml
+[network]
+mode = "pod"              # default: "host" (the historical behavior)
+ports = ["8080", "15432:5432"]   # "HOST" or "HOST:CONTAINER"; the rest stays internal
+```
+
+```console
+$ myc up
+Stack "shop" is running in its own private network — reachable from this
+machine: localhost:8080, localhost:15432 → port 5432 inside
+```
+
+How it works, rootless as always: `myc up` starts a tiny durable *holder*
+process that owns one user + network namespace pair for the stack, attaches
+a **single pasta instance** publishing the `[network]` ports, and every
+service joins those namespaces (`setns`) instead of creating its own. Two
+stacks can both run "their" redis on 6379 without ever colliding.
+
+Lifecycle, including the unhappy paths: when every service has exited (or
+on Ctrl-C) `myc up` stops the holder itself; if `up` is killed outright the
+holder dies with it (`PR_SET_PDEATHSIG`) and pasta exits as soon as the
+namespace empties, so nothing leaks. `myc down` cleans up whatever a brutal
+stop left behind (holder, pasta, the state record under `<store>/pods/`).
+`myc up --net pod` / `--net host` overrides the file without editing it.
+
+If pasta (package `passt`) is missing, a project file asking for pod mode
+falls back to the host network with a loud warning — the stack still runs —
+while an explicit `myc up --net pod` fails with the install hint. Try it:
+`examples/pod/mycel.toml` is a web + redis pair where redis is internal-only.
+
+The dashboard follows the same file: a stack with `mode = "pod"` shows a
+"private network" badge, the published ports, and "internal only — reachable
+by the other apps in this stack" for everything not exposed.
+
 ## How it works
 
 ```
@@ -542,7 +591,10 @@ named volumes with automatic data persistence (image `Volumes` are parsed
 at ingest and mapped to stable volumes by the dashboard),
 host networking plus opt-in rootless network isolation with published
 ports (`--net isolated` / `-p`, backed by pasta) and automatic port-conflict
-resolution in the dashboard, export/import archives, multi-service `up`, exact
+resolution in the dashboard, stack "pod" networking (`[network] mode =
+"pod"` in `mycel.toml`: one private network per stack, services meeting on
+localhost, only the listed ports published — see *Multi-service projects*),
+export/import archives, multi-service `up`/`down`, exact
 environment diffs, reverse blob/path queries, SBOM generation, per-env
 dedup analytics, environment doctor, interactive `shell`, the local
 web dashboard (`myc ui`), the team hub (`myc hub serve` / `push` /
@@ -551,21 +603,10 @@ builds (`myc build`, declarative adds + exec steps, no Dockerfile).
 
 Not yet implemented (by design, in order):
 
-1. Stack "pod" networking: all services of a stack sharing one private
-   network namespace, talking to each other on `localhost`, with only the
-   ports listed in `mycel.toml` published to the host. The architecture is
-   settled — a tiny holder process creates the user+network namespace and
-   keeps it alive for the stack's lifetime, one pasta instance attaches to
-   it with the stack's published ports, and each `myc run` joins it via
-   `setns` (a `--join-net PID` runtime option next to today's
-   `Network::Isolated`); `mycel.toml` grows `[network] mode = "pod"` and
-   per-service `ports = ["HOST:CONTAINER"]`. Not wired up yet: joining an
-   existing namespace bypasses the per-container pasta lifecycle that the
-   single-container path just introduced, and deserves its own pass.
-2. macOS micro-VM backend (today: Windows ships the transparent WSL2
+1. macOS micro-VM backend (today: Windows ships the transparent WSL2
    proxy — see *Windows & macOS*; macOS is architecture-only,
    `docs/desktop-architecture.md`)
-3. Hub: TLS termination and per-user tokens (today: one write token,
+2. Hub: TLS termination and per-user tokens (today: one write token,
    put nginx/caddy in front for TLS)
 
 ## License
