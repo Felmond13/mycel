@@ -16,7 +16,7 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: Felmond13/mycel/action@v0.1.0   # or @main
+      - uses: Felmond13/mycel/action@v0.2.0   # or @main
 
       - run: myc run alpine:3.20 -- echo hello from CI
 ```
@@ -33,7 +33,7 @@ That is the whole setup. The action:
 
 | Input | Default | Description |
 |---|---|---|
-| `version` | `latest` | Release tag to install (e.g. `v0.1.0`). |
+| `version` | `latest` | Release tag to install (e.g. `v0.2.0`). |
 | `store-path` | `~/.mycel` | Store location; exported as `MYCEL_STORE`. |
 | `cache` | `true` | Automatically cache the store between runs. |
 | `cache-key-prefix` | `mycel-store` | Change to force a cold store. |
@@ -68,7 +68,7 @@ run restores the store from cache in seconds and pulls only changed files.
 ```yaml
 steps:
   - uses: actions/checkout@v4
-  - uses: Felmond13/mycel/action@v0.1.0
+  - uses: Felmond13/mycel/action@v0.2.0
 
   - run: |
       myc pull postgres:16      # warm cache: verifies hashes, downloads ~0 B
@@ -80,7 +80,7 @@ If you prefer to manage the cache yourself, set `cache: false` and wire it
 manually:
 
 ```yaml
-  - uses: Felmond13/mycel/action@v0.1.0
+  - uses: Felmond13/mycel/action@v0.2.0
     with:
       cache: false
       store-path: /tmp/mycel-store

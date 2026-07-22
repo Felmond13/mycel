@@ -10,7 +10,7 @@ branding:
 inputs:
   version:
     description: >-
-      Release to install (a tag like v0.1.0, or "latest").
+      Release to install (a tag like v0.2.0, or "latest").
     required: false
     default: latest
   store-path:

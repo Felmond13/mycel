@@ -38,7 +38,7 @@ jobs:
 
       # Installs myc, exports MYCEL_STORE, and wires the store into
       # actions/cache. Warm runs start with every known file already local.
-      - uses: Felmond13/mycel/action@v0.1.0
+      - uses: Felmond13/mycel/action@v0.2.0
 
       - run: myc pull postgres:16   # warm cache: verifies, downloads ~0 B
       - run: myc run postgres:16 -- postgres --version

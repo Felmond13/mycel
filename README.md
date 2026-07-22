@@ -334,7 +334,7 @@ that changed** — usually nothing.
 
 ```yaml
 steps:
-  - uses: Felmond13/mycel/action@v0.1.0   # installs myc + caches the store
+  - uses: Felmond13/mycel/action@v0.2.0   # installs myc + caches the store
 
   - run: myc pull postgres:16   # warm cache: verifies hashes, ~0 B downloaded
   - run: myc run postgres:16 -- postgres --version
