@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: fmt + clippy + tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: cargo fmt --check
+        run: cargo fmt --all --check
+
+      - name: cargo clippy -D warnings
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: cargo test --workspace
+        run: cargo test --workspace
+
+  e2e:
+    name: end-to-end smoke test
+    runs-on: ubuntu-latest
+    # The e2e suite pulls real images from Docker Hub (anonymous pulls from
+    # shared runner IPs can hit rate limits) — keep it advisory so a registry
+    # hiccup never blocks a merge. Failures are still visible in the log.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Allow unprivileged user namespaces
+        # Ubuntu 24.04 images can ship with the AppArmor userns restriction
+        # enabled; Mycel is rootless and needs plain unprivileged userns.
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+
+      - name: Build release binary
+        run: bash scripts/dev.sh release
+
+      - name: Run e2e suite
+        run: bash scripts/e2e.sh

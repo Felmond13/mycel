@@ -1,0 +1,79 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  linux:
+    name: Linux x86_64 (static musl)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (stable) with musl target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+
+      - name: Install musl toolchain
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build static binary
+        run: cargo build --release -p myc-cli --target x86_64-unknown-linux-musl
+
+      - name: Rename binary
+        run: |
+          cp target/x86_64-unknown-linux-musl/release/myc myc-linux-x86_64
+          ./myc-linux-x86_64 --version
+
+      - name: Upload twin for the Windows build
+        uses: actions/upload-artifact@v4
+        with:
+          name: myc-linux-x86_64
+          path: myc-linux-x86_64
+
+      - name: Attach to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: myc-linux-x86_64
+
+  windows:
+    name: Windows x86_64 (embedded Linux twin)
+    runs-on: windows-latest
+    needs: linux
+    # Two-stage build (see scripts/build-windows.ps1): the Linux twin built
+    # above is embedded into myc.exe so the Windows binary is self-contained.
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Download Linux twin
+        uses: actions/download-artifact@v4
+        with:
+          name: myc-linux-x86_64
+
+      - name: Build myc.exe with embedded twin
+        shell: pwsh
+        run: |
+          $env:MYCEL_LINUX_BINARY = "$PWD\myc-linux-x86_64"
+          cargo build --release -p myc-cli
+          Copy-Item target\release\myc.exe myc-windows-x86_64.exe
+          .\myc-windows-x86_64.exe --version
+
+      - name: Attach to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: myc-windows-x86_64.exe

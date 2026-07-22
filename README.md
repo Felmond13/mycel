@@ -1,5 +1,7 @@
 # Mycel
 
+[![CI](https://github.com/Felmond13/mycel/actions/workflows/ci.yml/badge.svg)](https://github.com/Felmond13/mycel/actions/workflows/ci.yml)
+
 **Content-addressed container runtime. No daemon, no root, no image blobs.**
 
 Mycel replaces opaque container images with *content-addressed file graphs*:
@@ -315,6 +317,25 @@ aliases, jump hosts. The transfer is verified end-to-end (the server
 re-hashes every file and re-derives the manifest id), and the ref only
 becomes visible on the server once every file is present, so a killed
 deploy can never leave a half-environment. Details: [docs/deploy.md](docs/deploy.md).
+
+## CI in seconds
+
+GitHub-hosted runners are ephemeral, so Docker re-downloads the same layers
+on every single run. Mycel's store is a plain directory of content-addressed
+files: cache it with `actions/cache` and warm runs pull **only the files
+that changed** — usually nothing.
+
+```yaml
+steps:
+  - uses: Felmond13/mycel/action@v0.1.0   # installs myc + caches the store
+
+  - run: myc pull postgres:16   # warm cache: verifies hashes, ~0 B downloaded
+  - run: myc run postgres:16 -- postgres --version
+```
+
+First run ingests as usual; every run after that starts with all known files
+already local. Full guide with the before/after numbers:
+[docs/ci.md](docs/ci.md).
 
 ## Team hub: push and pull only the delta
 

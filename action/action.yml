@@ -1,0 +1,104 @@
+name: Setup Mycel
+description: >-
+  Install the myc binary and cache the content-addressed Mycel store so
+  later CI runs only download files that actually changed.
+author: Felmond13
+branding:
+  icon: box
+  color: green
+
+inputs:
+  version:
+    description: >-
+      Release to install (a tag like v0.1.0, or "latest").
+    required: false
+    default: latest
+  store-path:
+    description: >-
+      Where the Mycel content store lives. Exported as MYCEL_STORE for all
+      following steps, and used as the cache path when cache is enabled.
+    required: false
+    default: ~/.mycel
+  cache:
+    description: >-
+      Wire the store into actions/cache automatically. Because the store is
+      content-addressed, restoring any previous snapshot means only new or
+      changed files are fetched by subsequent pulls.
+    required: false
+    default: "true"
+  cache-key-prefix:
+    description: Prefix for the cache key (change it to force a cold store).
+    required: false
+    default: mycel-store
+  token:
+    description: GitHub token used to download the release asset.
+    required: false
+    default: ${{ github.token }}
+
+outputs:
+  store-path:
+    description: Resolved absolute path of the Mycel store.
+    value: ${{ steps.paths.outputs.store }}
+  version:
+    description: Version string reported by `myc --version`.
+    value: ${{ steps.install.outputs.version }}
+
+runs:
+  using: composite
+  steps:
+    - id: paths
+      shell: bash
+      run: |
+        # Expand ~ manually: composite inputs are not shell-expanded.
+        store="${{ inputs.store-path }}"
+        store="${store/#\~/$HOME}"
+        mkdir -p "$store"
+        echo "store=$store" >> "$GITHUB_OUTPUT"
+        echo "MYCEL_STORE=$store" >> "$GITHUB_ENV"
+
+    - name: Restore Mycel store
+      if: ${{ inputs.cache == 'true' }}
+      uses: actions/cache@v4
+      with:
+        path: ${{ steps.paths.outputs.store }}
+        # A per-run key plus a prefix restore-key means: always restore the
+        # most recent store, always save the (possibly grown) store at the
+        # end of the job. Content-addressing makes stale entries harmless —
+        # `myc gc` inside a job can trim the store if it ever grows too big.
+        key: ${{ inputs.cache-key-prefix }}-${{ runner.os }}-${{ github.run_id }}
+        restore-keys: |
+          ${{ inputs.cache-key-prefix }}-${{ runner.os }}-
+
+    - id: install
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+        MYC_VERSION: ${{ inputs.version }}
+      run: |
+        set -euo pipefail
+        asset="myc-linux-x86_64"
+        bindir="$RUNNER_TEMP/mycel-bin"
+        mkdir -p "$bindir"
+
+        if command -v gh >/dev/null 2>&1; then
+          if [ "$MYC_VERSION" = "latest" ]; then
+            gh release download --repo Felmond13/mycel \
+              --pattern "$asset" --output "$bindir/myc"
+          else
+            gh release download "$MYC_VERSION" --repo Felmond13/mycel \
+              --pattern "$asset" --output "$bindir/myc"
+          fi
+        else
+          if [ "$MYC_VERSION" = "latest" ]; then
+            url="https://github.com/Felmond13/mycel/releases/latest/download/$asset"
+          else
+            url="https://github.com/Felmond13/mycel/releases/download/$MYC_VERSION/$asset"
+          fi
+          curl -fsSL --retry 3 -o "$bindir/myc" "$url"
+        fi
+
+        chmod +x "$bindir/myc"
+        echo "$bindir" >> "$GITHUB_PATH"
+        version="$("$bindir/myc" --version)"
+        echo "version=$version" >> "$GITHUB_OUTPUT"
+        echo "installed $version (store: $MYCEL_STORE)"
