@@ -1,0 +1,20 @@
+[package]
+name = "myc-oci"
+description = "OCI registry client and image ingestion: decomposes Docker images into the Mycel file graph"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+myc-manifest = { workspace = true }
+myc-store = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+reqwest = { workspace = true }
+flate2 = { workspace = true }
+zstd = { workspace = true }
+tar = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+thiserror = { workspace = true }
+tempfile = { workspace = true }

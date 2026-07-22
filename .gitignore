@@ -1,0 +1,20 @@
+# Build artifacts
+/target/
+**/target/
+
+# Local test artifacts
+*.mycel
+*.mycel.tar.gz
+*.tar.gz
+img.tar
+
+# Agent / scratch scripts (local experiments, not part of the project)
+.agent-*
+tmp-*.sh
+
+# Editor / OS noise
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db

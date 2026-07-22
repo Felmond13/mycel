@@ -1,0 +1,17 @@
+[package]
+name = "myc-backend"
+description = "Execution backends: native Linux namespaces, transparent WSL2 proxying on Windows, VM scaffold for macOS"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+myc-manifest = { workspace = true }
+myc-store = { workspace = true }
+myc-run = { workspace = true }
+thiserror = { workspace = true }
+tempfile = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+sha2 = { workspace = true }
+hex = { workspace = true }

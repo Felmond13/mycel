@@ -1,0 +1,18 @@
+[package]
+name = "myc-compose"
+description = "Minimal local orchestrator: declare multi-service environments in mycel.toml, run them with one command"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+myc-manifest = { workspace = true }
+myc-store = { workspace = true }
+myc-oci = { workspace = true }
+myc-run = { workspace = true }
+serde = { workspace = true }
+toml = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

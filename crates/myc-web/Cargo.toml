@@ -1,0 +1,29 @@
+[package]
+name = "myc-web"
+description = "Local web dashboard for the Mycel store: browse, diff, ingest and query environments from the browser"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+myc-manifest = { workspace = true }
+myc-store = { workspace = true }
+myc-oci = { workspace = true }
+myc-query = { workspace = true }
+myc-compose = { workspace = true }
+myc-run = { workspace = true }
+myc-hub = { workspace = true }
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+axum = { workspace = true }
+include_dir = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+futures-util = { workspace = true }
+blake3 = { workspace = true }
+toml = { workspace = true }
+tempfile = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+nix = { workspace = true }

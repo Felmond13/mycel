@@ -1,0 +1,19 @@
+# Minimal native build: alpine base + one script + one exec step.
+# Build and run:
+#   myc build -f examples/build-hello/mycel-build.toml
+#   myc run build-hello:1
+[build]
+base = "alpine:3.20"
+name = "build-hello:1"
+
+[[build.add]]
+source = "app/hello.sh"
+dest = "/usr/local/bin/hello"
+mode = 0o755
+
+[[build.run]]
+command = ["/bin/sh", "-c", "echo build-hello > /etc/built-with"]
+
+[config]
+cmd = ["/usr/local/bin/hello"]
+env = ["GREETING=bonjour"]

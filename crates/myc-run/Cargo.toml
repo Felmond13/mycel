@@ -1,0 +1,18 @@
+[package]
+name = "myc-run"
+description = "Rootfs materialization from the content store and rootless container execution (Linux namespaces)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+myc-manifest = { workspace = true }
+myc-store = { workspace = true }
+thiserror = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+nix = { workspace = true }
+libc = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

@@ -1,0 +1,18 @@
+[package]
+name = "myc-query"
+description = "Store-wide queries that exploit the content-addressed model: diff, reverse blob lookup, SBOM, dedup analytics, environment doctor"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+myc-manifest = { workspace = true }
+myc-store = { workspace = true }
+myc-run = { workspace = true }
+myc-oci = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

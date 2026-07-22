@@ -1,0 +1,67 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/myc-manifest",
+    "crates/myc-store",
+    "crates/myc-oci",
+    "crates/myc-run",
+    "crates/myc-compose",
+    "crates/myc-query",
+    "crates/myc-web",
+    "crates/myc-hub",
+    "crates/myc-lazy",
+    "crates/myc-build",
+    "crates/myc-backend",
+    "crates/myc-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/mycel-runtime/mycel"
+
+[workspace.dependencies]
+anyhow = "1"
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+blake3 = "1"
+hex = "0.4"
+sha2 = "0.10"
+clap = { version = "4", features = ["derive", "wrap_help"] }
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls", "json"] }
+flate2 = "1"
+zstd = "0.13"
+tar = "0.4"
+fs2 = "0.4"
+nix = { version = "0.29", features = ["sched", "mount", "process", "user", "hostname", "signal", "fs"] }
+libc = "0.2"
+toml = "0.8"
+tempfile = "3"
+ctrlc = "3"
+axum = "0.8"
+include_dir = "0.7"
+tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "fs"] }
+tokio-util = { version = "0.7", features = ["io"] }
+futures-util = { version = "0.3", default-features = false }
+# Pure-rust FUSE mounting (no "libfuse" feature): unprivileged mounts go
+# through the setuid fusermount3 helper present on any fuse3 install.
+fuser = { version = "0.15", default-features = false }
+
+myc-manifest = { path = "crates/myc-manifest" }
+myc-store = { path = "crates/myc-store" }
+myc-oci = { path = "crates/myc-oci" }
+myc-run = { path = "crates/myc-run" }
+myc-compose = { path = "crates/myc-compose" }
+myc-query = { path = "crates/myc-query" }
+myc-web = { path = "crates/myc-web" }
+myc-hub = { path = "crates/myc-hub" }
+myc-lazy = { path = "crates/myc-lazy" }
+myc-build = { path = "crates/myc-build" }
+myc-backend = { path = "crates/myc-backend" }
+
+[profile.release]
+lto = "thin"
+strip = true
+opt-level = 3

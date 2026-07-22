@@ -1,0 +1,19 @@
+[package]
+name = "myc-lazy"
+description = "Lazy streaming rootfs for Mycel: a FUSE filesystem that fetches file contents from a hub on first access"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+myc-manifest = { workspace = true }
+myc-store = { workspace = true }
+myc-hub = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+libc = { workspace = true }
+fuser = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+myc-run = { workspace = true }

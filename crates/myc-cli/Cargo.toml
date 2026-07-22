@@ -1,0 +1,30 @@
+[package]
+name = "myc-cli"
+description = "myc: the Mycel CLI"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "myc"
+path = "src/main.rs"
+
+[dependencies]
+myc-manifest = { workspace = true }
+myc-store = { workspace = true }
+myc-oci = { workspace = true }
+myc-run = { workspace = true }
+myc-compose = { workspace = true }
+myc-query = { workspace = true }
+myc-web = { workspace = true }
+myc-hub = { workspace = true }
+myc-build = { workspace = true }
+myc-backend = { workspace = true }
+anyhow = { workspace = true }
+serde_json = { workspace = true }
+clap = { workspace = true }
+tempfile = { workspace = true }
+
+# FUSE-based lazy streaming is Linux-only (fuser does not build elsewhere).
+[target.'cfg(target_os = "linux")'.dependencies]
+myc-lazy = { workspace = true }

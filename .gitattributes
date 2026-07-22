@@ -1,0 +1,19 @@
+# Normalize everything to LF: the project has a history of CRLF breakage
+# (shell scripts and embedded assets must stay byte-stable across platforms).
+* text=auto eol=lf
+
+# Windows-only scripts keep CRLF so they run under legacy PowerShell hosts.
+*.ps1 text eol=crlf
+
+# Binary files: never touch line endings.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.woff binary
+*.woff2 binary
+*.tar binary
+*.gz binary
+*.zst binary
+*.exe binary

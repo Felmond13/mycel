@@ -1,0 +1,15 @@
+# Minimal multi-service Mycel project.
+# Run with: myc up -f examples/hello/mycel.toml
+
+[project]
+name = "hello"
+
+[services.worker]
+image = "alpine:3.20"
+command = ["/bin/sh", "-c", "for i in 1 2 3; do echo worker tick $i; sleep 1; done"]
+
+[services.greeter]
+image = "alpine:3.21"
+command = ["/bin/sh", "-c", "echo bonjour depuis greeter; sleep 2; echo greeter done"]
+depends_on = ["worker"]
+env = ["GREETING=bonjour"]
