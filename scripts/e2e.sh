@@ -45,10 +45,13 @@ out="$(MYCEL_STORE="$WORK/store2" "$MYC" run alpine:3.20 -- /bin/echo import-ok)
 echo "== export --oci: standard OCI image (docker load / podman / skopeo) =="
 "$MYC" export --oci alpine:3.20 "$WORK/alpine-oci.tar"
 # Structure: both formats in one tar (OCI layout + docker-save manifest.json).
-tar tf "$WORK/alpine-oci.tar" | grep -q '^oci-layout$' || { echo "oci-layout missing"; exit 1; }
-tar tf "$WORK/alpine-oci.tar" | grep -q '^index.json$' || { echo "index.json missing"; exit 1; }
-tar tf "$WORK/alpine-oci.tar" | grep -q '^manifest.json$' || { echo "manifest.json missing"; exit 1; }
-tar tf "$WORK/alpine-oci.tar" | grep -q '^blobs/sha256/' || { echo "blobs/sha256 missing"; exit 1; }
+# List once into a variable: `tar tf | grep -q` dies of EPIPE under pipefail
+# when grep quits at the first entry (oci-layout is the first one).
+oci_toc="$(tar tf "$WORK/alpine-oci.tar")"
+echo "$oci_toc" | grep -q '^oci-layout$' || { echo "oci-layout missing"; exit 1; }
+echo "$oci_toc" | grep -q '^index.json$' || { echo "index.json missing"; exit 1; }
+echo "$oci_toc" | grep -q '^manifest.json$' || { echo "manifest.json missing"; exit 1; }
+echo "$oci_toc" | grep -q '^blobs/sha256/' || { echo "blobs/sha256 missing"; exit 1; }
 # Determinism: a second export is byte-identical.
 "$MYC" export --oci alpine:3.20 "$WORK/alpine-oci2.tar"
 cmp "$WORK/alpine-oci.tar" "$WORK/alpine-oci2.tar" \
