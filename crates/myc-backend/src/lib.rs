@@ -12,11 +12,119 @@
 //! actionable fix when it cannot), `run()` executes one container.
 
 #[cfg(target_os = "linux")]
+pub mod kvm;
+#[cfg(target_os = "linux")]
 pub mod native;
 #[cfg(target_os = "macos")]
 pub mod vm;
 #[cfg(windows)]
 pub mod wsl;
+
+/// Isolation tiers, strongest first. Mycel never depends on a single one:
+/// `detect_engines()` reports what this machine can do and
+/// [`default_backend`] picks the best *complete* engine (see
+/// `docs/isolation-engines.md`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EngineKind {
+    /// Real virtual machine, own kernel (Linux + KVM). Strongest isolation;
+    /// prototype scope today (see [`kvm`]).
+    KvmMicroVm,
+    /// Real virtual machine via Hypervisor.framework (macOS plan,
+    /// `docs/desktop-architecture.md`).
+    HypervisorFramework,
+    /// Transparent proxy to the Linux twin inside WSL2 (Windows).
+    Wsl2,
+    /// User namespaces: shared kernel, Docker-level isolation. The reliable
+    /// default everywhere Mycel runs today.
+    NativeNamespaces,
+}
+
+impl EngineKind {
+    /// Stable identifier used in `myc doctor` output and reports.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::KvmMicroVm => "kvm-microvm",
+            Self::HypervisorFramework => "hvf-microvm",
+            Self::Wsl2 => "wsl2-twin",
+            Self::NativeNamespaces => "native-namespaces",
+        }
+    }
+
+    /// True when containers get their own kernel (a real VM).
+    pub fn is_micro_vm(self) -> bool {
+        matches!(self, Self::KvmMicroVm | Self::HypervisorFramework)
+    }
+
+    /// What this tier does *not* give you, shown next to the engine.
+    pub fn degraded_features(self) -> &'static [&'static str] {
+        match self {
+            Self::KvmMicroVm | Self::HypervisorFramework => {
+                &["prototype: arbitrary environments not wired through the guest yet"]
+            }
+            Self::Wsl2 => &["containers execute inside the WSL2 Linux twin"],
+            Self::NativeNamespaces => &[
+                "shared kernel with the host — isolation is Docker-level, not better",
+                "no whole-memory snapshot/restore",
+            ],
+        }
+    }
+}
+
+/// One detected tier: what it is, whether it works here, whether it can run
+/// every environment (complete) or only part of them yet.
+#[derive(Debug, Clone)]
+pub struct EngineInfo {
+    pub kind: EngineKind,
+    pub available: bool,
+    /// True when the tier can run arbitrary environments end to end.
+    pub complete: bool,
+}
+
+/// Every isolation tier this machine could use, strongest first.
+///
+/// The engine choice is automatic — users never configure it; `myc doctor`
+/// prints this list so the choice is never a mystery. The default backend is
+/// the strongest *complete* tier: the microVM tiers are deliberately not
+/// default until they carry the full `RunRequest` surface.
+pub fn detect_engines(store_root: &std::path::Path) -> Vec<EngineInfo> {
+    let mut engines = Vec::new();
+    #[cfg(target_os = "linux")]
+    {
+        let kvm = kvm::KvmMicroVm::from_env();
+        let report = kvm.probe(store_root);
+        engines.push(EngineInfo {
+            kind: EngineKind::KvmMicroVm,
+            available: report.available,
+            complete: false,
+        });
+    }
+    #[cfg(target_os = "macos")]
+    {
+        engines.push(EngineInfo {
+            kind: EngineKind::HypervisorFramework,
+            available: false,
+            complete: false,
+        });
+    }
+    #[cfg(windows)]
+    {
+        engines.push(EngineInfo {
+            kind: EngineKind::Wsl2,
+            available: true,
+            complete: true,
+        });
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let native = native::NativeLinux.probe(store_root);
+        engines.push(EngineInfo {
+            kind: EngineKind::NativeNamespaces,
+            available: native.available,
+            complete: true,
+        });
+    }
+    engines
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum BackendError {

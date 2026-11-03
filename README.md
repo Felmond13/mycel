@@ -553,6 +553,25 @@ every file from the store, then enters fresh namespaces, pivot_roots and
 execs. Ten containers from ten images share every common file on disk and in
 page cache.
 
+## Isolation engines
+
+Containers can run in several isolation tiers — Mycel never depends on a
+single one, and the choice is automatic (users never configure it; `myc
+doctor` prints the detected tiers so it is never a mystery):
+
+- **`native-namespaces`** — rootless user namespaces, the default everywhere
+  Mycel runs today. Shared kernel: Docker-level isolation, not better.
+- **`wsl2-twin`** — Windows ships a transparent proxy into a Linux twin
+  inside WSL2 (one store, one feature set).
+- **`kvm-microvm`** *(prototype)* — a real microVM with its own kernel via
+  Cloud Hypervisor: the tier that ends kernel-sharing. Boot benchmark vs
+  Docker (same static binary both sides): `bench/microvm`.
+- **`hvf-microvm`** — the macOS plan (Virtualization.framework), architecture
+  only for now.
+
+Status, benchmark protocol and results, and the snapshot/restore findings
+live in [docs/isolation-engines.md](docs/isolation-engines.md).
+
 ## Security model
 
 - **Rootless by construction**: the runtime never needs root; uid 0 inside a

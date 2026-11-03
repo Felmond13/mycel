@@ -1051,6 +1051,27 @@ pub fn doctor(root: &Path) -> Result<i32> {
         }
     }
     println!();
+    // Isolation engines, strongest first — the choice is automatic, never a
+    // mystery (docs/isolation-engines.md). READY = runs everything, PROTO =
+    // works but only the prototype workload, off = not usable here.
+    println!("isolation engines (strongest first):");
+    for engine in myc_backend::detect_engines(root) {
+        let state = if engine.available {
+            if engine.complete {
+                paint.green("READY")
+            } else {
+                paint.yellow("PROTO")
+            }
+        } else {
+            paint.dim("off  ")
+        };
+        println!(
+            "  {state}  {:<20} {}",
+            engine.kind.label(),
+            engine.kind.degraded_features().join("; ")
+        );
+    }
+    println!();
     if failures == 0 {
         println!(
             "{}",

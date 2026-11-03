@@ -11,6 +11,10 @@ myc-store = { workspace = true }
 myc-run = { workspace = true }
 thiserror = { workspace = true }
 tempfile = { workspace = true }
+# Used by examples/boot (park until SIGTERM/SIGINT); the library itself is
+# std-only. "termination" = also trap SIGTERM, not just Ctrl-C — without it
+# a `kill -TERM` bypasses the handler AND Drop, leaking the VMM child.
+ctrlc = { workspace = true, features = ["termination"] }
 
 [target.'cfg(windows)'.dependencies]
 sha2 = { workspace = true }
