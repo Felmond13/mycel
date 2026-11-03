@@ -18,3 +18,7 @@ tmp-*.sh
 *.swp
 .DS_Store
 Thumbs.db
+
+# bench microVM : artefacts generes (resultats archives dans docs/benchmarks/)
+bench/microvm/assets/
+bench/microvm/results/
