@@ -34,6 +34,11 @@ use std::sync::{Arc, Mutex};
 const INDEX_HTML: &str = include_str!("../assets/index.html");
 const STYLE_CSS: &str = include_str!("../assets/style.css");
 const VUE_JS: &str = include_str!("../assets/vendor/vue.global.prod.js");
+// Installable-app (PWA) assets, embedded like the rest — no CDN, no build.
+const MANIFEST_WEBMANIFEST: &str = include_str!("../assets/pwa/manifest.webmanifest");
+const SW_JS: &str = include_str!("../assets/pwa/sw.js");
+const ICON_192_PNG: &[u8] = include_bytes!("../assets/pwa/icons/icon-192.png");
+const ICON_512_PNG: &[u8] = include_bytes!("../assets/pwa/icons/icon-512.png");
 
 /// The whole ES-module frontend, embedded at compile time. Adding a new
 /// component file under `assets/js/` requires no route changes: requests to
@@ -156,6 +161,33 @@ async fn style_css() -> Response {
 
 async fn vue_js() -> Response {
     static_asset("application/javascript; charset=utf-8", VUE_JS)
+}
+
+/// `GET /manifest.webmanifest` — installability manifest of the dashboard.
+async fn manifest_webmanifest() -> Response {
+    static_asset(
+        "application/manifest+json; charset=utf-8",
+        MANIFEST_WEBMANIFEST,
+    )
+}
+
+/// `GET /sw.js` — served at the root so its default scope (`/`) covers
+/// the whole dashboard (offline shell; see assets/pwa/sw.js).
+async fn sw_js() -> Response {
+    static_asset("application/javascript; charset=utf-8", SW_JS)
+}
+
+/// Same as [`static_asset`] for binary payloads (PNG icons).
+fn static_asset_bytes(content_type: &'static str, body: &'static [u8]) -> Response {
+    ([(axum::http::header::CONTENT_TYPE, content_type)], body).into_response()
+}
+
+async fn icon_192() -> Response {
+    static_asset_bytes("image/png", ICON_192_PNG)
+}
+
+async fn icon_512() -> Response {
+    static_asset_bytes("image/png", ICON_512_PNG)
 }
 
 /// Serve one file of the embedded `assets/js/` tree. The request path is
@@ -1585,6 +1617,10 @@ pub fn serve(store_root: PathBuf, port: u16) -> anyhow::Result<()> {
         .route("/", get(index))
         .route("/style.css", get(style_css))
         .route("/vendor/vue.js", get(vue_js))
+        .route("/manifest.webmanifest", get(manifest_webmanifest))
+        .route("/sw.js", get(sw_js))
+        .route("/icons/icon-192.png", get(icon_192))
+        .route("/icons/icon-512.png", get(icon_512))
         .route("/js/{*path}", get(js_asset))
         .route("/api/envs", get(list_envs))
         .route("/api/envs/{id}", get(env_detail))

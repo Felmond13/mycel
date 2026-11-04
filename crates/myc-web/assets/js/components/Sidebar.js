@@ -3,6 +3,7 @@
 import { S } from "../store.js";
 import { navKey } from "../router.js";
 import { fmtBytes } from "../format.js";
+import { PWA, promptInstall } from "../pwa.js";
 
 export default {
   name: "SideBar",
@@ -13,7 +14,9 @@ export default {
       if (!S.stats) return "…";
       return this.runningCount + " running · " + fmtBytes(S.stats.physical_bytes) + " on disk";
     },
+    canInstall() { return PWA.canInstall; },
   },
+  methods: { promptInstall },
   template: `
   <nav class="side">
     <div class="logo">
@@ -79,6 +82,14 @@ export default {
       <span class="nav-text">Doctor</span>
     </a>
 
-    <div class="nav-foot">local dashboard<br><code>{{ footText }}</code></div>
+    <div class="nav-foot">
+      local dashboard<br><code>{{ footText }}</code>
+      <div class="nav-help">
+        Aide : <a href="#started">premiers pas</a>
+      </div>
+      <button v-if="canInstall" class="btn sm ghost nav-install" @click="promptInstall">
+        Installer l'application
+      </button>
+    </div>
   </nav>`,
 };

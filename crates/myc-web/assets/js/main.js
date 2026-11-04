@@ -40,8 +40,10 @@ import DiffPage from "./components/DiffPage.js";
 import SearchPage from "./components/SearchPage.js";
 import DoctorPage from "./components/DoctorPage.js";
 import SnapshotsPage from "./components/SnapshotsPage.js";
-import PerformancePage from "./components/PerformancePage.js"; // wave 2 — stub
-import GettingStartedPage from "./components/GettingStartedPage.js"; // wave 2 — stub
+import PerformancePage from "./components/PerformancePage.js";
+import GettingStartedPage from "./components/GettingStartedPage.js";
+import { initPWA } from "./pwa.js";
+import { maybeStartOnboarding } from "./onboarding.js";
 
 const app = createApp(AppShell);
 
@@ -85,3 +87,8 @@ app.component("getting-started-page", GettingStartedPage);
 startPolling();
 startRouter();
 app.mount("#app");
+
+// PWA (service worker + bouton d'installation) et déclenchement du
+// parcours « Premiers pas » quand le magasin est vide.
+initPWA();
+maybeStartOnboarding();
