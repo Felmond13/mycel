@@ -373,7 +373,12 @@ pub fn run(root: &Path, reference: &str, args: RunArgs) -> Result<i32> {
     // the Linux default (docs/isolation-engines.md).
     match args.engine.as_deref() {
         None | Some("auto") | Some("native-namespaces") => {}
+        #[cfg(target_os = "linux")]
         Some("kvm-microvm") => return run_kvm_engine(root, reference, args),
+        #[cfg(not(target_os = "linux"))]
+        Some("kvm-microvm") => {
+            bail!("kvm-microvm requires Linux; on Windows/macOS the twin picks the engine")
+        }
         Some(other) => {
             bail!("unknown engine '{other}' (expected auto, native-namespaces or kvm-microvm)")
         }
@@ -435,6 +440,7 @@ pub fn run(root: &Path, reference: &str, args: RunArgs) -> Result<i32> {
 /// `myc run --engine kvm-microvm`: same CLI surface, executed inside a real
 /// microVM with its own kernel. The reference is resolved/ingested first so
 /// an unknown name behaves exactly like a native run.
+#[cfg(target_os = "linux")]
 fn run_kvm_engine(root: &Path, reference: &str, args: RunArgs) -> Result<i32> {
     use myc_backend::ExecBackend;
 
