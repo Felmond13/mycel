@@ -35,6 +35,10 @@ pub const DEFAULT_KERNEL: &str = "/usr/local/share/mycel/vmlinux";
 
 /// Guest-side subnet used by this backend: host tap `.1`, guest `.2`.
 pub const GUEST_IP: [u8; 4] = [192, 168, 77, 2];
+/// Same as [`GUEST_IP`], dotted form (for `ip neigh`).
+pub const GUEST_IP_STR: &str = "192.168.77.2";
+/// Fixed guest MAC (matches the `--net` argument below).
+pub const GUEST_MAC: &str = "52:54:00:77:00:02";
 /// Port the bench workload listens on inside the guest.
 pub const GUEST_PORT: u16 = 8080;
 /// Host-side tap address.
@@ -160,6 +164,37 @@ impl KvmMicroVm {
             Err(e) => return Err(BackendError::Io(e)),
         }
 
+        // First-contact ARP: the earliest probe can leave before the guest
+        // brings eth0 up; the kernel then keeps an INCOMPLETE neighbour entry
+        // until its ~1 s resolution timer — that was the ENTIRE p95 tail of
+        // the boot benchmark (proof: docs/benchmarks/microvm-tail-analysis.md).
+        // The guest MAC is fixed, so pre-seed a permanent neighbour entry as
+        // soon as the tap exists (Cloud Hypervisor creates it at startup).
+        for _ in 0..10 {
+            let seeded = Command::new("ip")
+                .args([
+                    "neigh",
+                    "replace",
+                    GUEST_IP_STR,
+                    "lladdr",
+                    GUEST_MAC,
+                    "dev",
+                    "myc0",
+                    "nud",
+                    "permanent",
+                ])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false);
+            if seeded {
+                break;
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+
         Ok(RunningVm {
             child,
             ch_remote: self.ch_remote.clone(),
@@ -250,16 +285,19 @@ pub struct RunningVm {
 }
 
 impl RunningVm {
-    /// Block until the guest accepts TCP on the bench port, or `deadline`.
-    pub fn wait_ready(&self, deadline: Instant) -> Result<Duration> {
+    /// Block until the guest accepts TCP on the bench port, or `timeout`
+    /// elapses. Returns how long the guest took to become reachable.
+    pub fn wait_ready(&self, timeout: Duration) -> Result<Duration> {
+        let start = Instant::now();
+        let deadline = start + timeout;
         let addr = SocketAddr::from((GUEST_IP, GUEST_PORT));
         loop {
             if TcpStream::connect_timeout(&addr, Duration::from_millis(50)).is_ok() {
-                return Ok(deadline.elapsed());
+                return Ok(start.elapsed());
             }
             if Instant::now() >= deadline {
                 return Err(BackendError::Unavailable(
-                    "guest did not become ready before the deadline (see console log in the state dir)".into(),
+                    "guest did not become ready before the timeout (see console log in the state dir)".into(),
                 ));
             }
             thread::sleep(Duration::from_millis(5));

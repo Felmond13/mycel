@@ -7,7 +7,7 @@
 
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 static STOP: AtomicBool = AtomicBool::new(false);
 
@@ -26,8 +26,7 @@ fn main() {
         }
     };
 
-    let start = Instant::now();
-    match vm.wait_ready(start + Duration::from_secs(20)) {
+    match vm.wait_ready(Duration::from_secs(20)) {
         Ok(elapsed) => eprintln!("boot: guest ready in {elapsed:?}"),
         Err(e) => {
             eprintln!("boot: {e}");
