@@ -1,0 +1,148 @@
+=== comparatif docker vs mycel — Wed Nov  4 00:18:25 UTC 2026 ===
+myc: myc 0.2.0 ; docker: Docker version 29.1.3, build 29.1.3-0ubuntu4.1
+
+=== phase 1 : à froid (réseau réel), puis à chaud, puis démarrage ===
+
+--- alpine:3.20 (commande mesurée : echo hi) ---
+alpine:3.20 docker-cold 1 3369 ms
+alpine:3.20 docker-cold 2 3188 ms
+alpine:3.20 docker-cold 3 3064 ms
+alpine:3.20 docker-warm 1 1739 ms
+alpine:3.20 docker-warm 2 1833 ms
+alpine:3.20 docker-warm 3 1737 ms
+alpine:3.20 docker-size 3641182 octets (taille image décompressée)
+alpine:3.20 myc-cold 1 2734 ms ; +7842013 octets au store
+alpine:3.20 myc-cold 2 1811 ms ; +7842013 octets au store
+alpine:3.20 myc-cold 3 1871 ms ; +7842013 octets au store
+alpine:3.20 myc-warm 1 1867 ms ; +0 octets
+alpine:3.20 myc-warm 2 1885 ms ; +0 octets
+alpine:3.20 myc-warm 3 1912 ms ; +0 octets
+
+--- alpine:3.21 (commande mesurée : echo hi) ---
+alpine:3.21 docker-cold 1 3231 ms
+alpine:3.21 docker-cold 2 3338 ms
+alpine:3.21 docker-cold 3 2954 ms
+alpine:3.21 docker-warm 1 1650 ms
+alpine:3.21 docker-warm 2 1712 ms
+alpine:3.21 docker-warm 3 2221 ms
+alpine:3.21 docker-size 3636246 octets (taille image décompressée)
+alpine:3.21 myc-cold 1 1901 ms ; +7771733 octets au store
+alpine:3.21 myc-cold 2 1669 ms ; +7771733 octets au store
+alpine:3.21 myc-cold 3 1701 ms ; +7771733 octets au store
+alpine:3.21 myc-warm 1 1921 ms ; +0 octets
+alpine:3.21 myc-warm 2 2944 ms ; +0 octets
+alpine:3.21 myc-warm 3 1831 ms ; +0 octets
+
+--- nginx:1.27-alpine (commande mesurée : nginx -v) ---
+nginx:1.27-alpine docker-cold 1 4485 ms
+nginx:1.27-alpine docker-cold 2 4220 ms
+nginx:1.27-alpine docker-cold 3 5382 ms
+nginx:1.27-alpine docker-warm 1 2061 ms
+nginx:1.27-alpine docker-warm 2 1927 ms
+nginx:1.27-alpine docker-warm 3 1949 ms
+nginx:1.27-alpine docker-size 20984244 octets (taille image décompressée)
+nginx:1.27-alpine myc-cold 1 3822 ms ; +47805783 octets au store
+nginx:1.27-alpine myc-cold 2 3830 ms ; +47805783 octets au store
+nginx:1.27-alpine myc-cold 3 3498 ms ; +47805783 octets au store
+nginx:1.27-alpine myc-warm 1 3809 ms ; +0 octets
+nginx:1.27-alpine myc-warm 2 4328 ms ; +0 octets
+nginx:1.27-alpine myc-warm 3 3723 ms ; +0 octets
+
+--- redis:7-alpine (commande mesurée : redis-server --version) ---
+redis:7-alpine docker-cold 1 3104 ms
+redis:7-alpine docker-cold 2 4521 ms
+redis:7-alpine docker-cold 3 3206 ms
+redis:7-alpine docker-warm 1 1944 ms
+redis:7-alpine docker-warm 2 2725 ms
+redis:7-alpine docker-warm 3 1727 ms
+redis:7-alpine docker-size 16261881 octets (taille image décompressée)
+redis:7-alpine myc-cold 1 2945 ms ; +31064418 octets au store
+redis:7-alpine myc-cold 2 3324 ms ; +31064418 octets au store
+redis:7-alpine myc-cold 3 3535 ms ; +31064418 octets au store
+redis:7-alpine myc-warm 1 3343 ms ; +0 octets
+redis:7-alpine myc-warm 2 3061 ms ; +0 octets
+redis:7-alpine myc-warm 3 3046 ms ; +0 octets
+
+--- python:3.12-alpine (commande mesurée : python3 -V) ---
+python:3.12-alpine docker-cold 1 3615 ms
+python:3.12-alpine docker-cold 2 3668 ms
+python:3.12-alpine docker-cold 3 3817 ms
+python:3.12-alpine docker-warm 1 1609 ms
+python:3.12-alpine docker-warm 2 1800 ms
+python:3.12-alpine docker-warm 3 1705 ms
+python:3.12-alpine docker-size 18062363 octets (taille image décompressée)
+python:3.12-alpine myc-cold 1 2705 ms ; +48405490 octets au store
+python:3.12-alpine myc-cold 2 2904 ms ; +48405490 octets au store
+python:3.12-alpine myc-cold 3 3072 ms ; +48405490 octets au store
+python:3.12-alpine myc-warm 1 3306 ms ; +0 octets
+python:3.12-alpine myc-warm 2 3566 ms ; +0 octets
+python:3.12-alpine myc-warm 3 2467 ms ; +0 octets
+
+=== phase 2 : totaux et dédup inter-images ===
+docker — somme des .Size des 5 images :
+mycel — store complet après les 5 ingests :
+  142760917 octets (144M)
+environments:  5
+blobs:         2606 (135.0 MiB physical)
+logical size:  145.0 MiB
+dedup ratio:   1.07x (10.0 MiB saved)
+
+PER-ENVIRONMENT SHARING                         BLOBS   SHARED   UNIQUE  UNIQUE SIZE
+docker.io/library/alpine:3.20                      80       1%       27      7.4 MiB
+docker.io/library/alpine:3.21                      81     100%        3     24.6 KiB
+docker.io/library/nginx:1.27-alpine               949       2%      440     44.7 MiB
+docker.io/library/python:3.12-alpine             2085       2%     1562     45.6 MiB
+docker.io/library/redis:7-alpine                  441      21%       15     29.3 MiB
+
+=== phase 3 : diff réel entre deux versions (spécialité mycel) ===
+~ /bin/busybox                                                 789.8 KiB -> 789.8 KiB  content changed
+~ /etc/alpine-release                                          8 B -> 7 B  content changed
+~ /etc/apk/repositories                                        103 B -> 103 B  content changed
+~ /etc/apk/world                                               59 B -> 74 B  content changed
+~ /etc/issue                                                   54 B -> 54 B  content changed
+~ /etc/mtab                                                    0 B -> 0 B  symlink target /proc/mounts -> ../proc/mounts
+~ /etc/os-release                                              189 B -> 0 B  kind File -> Symlink
+~ /etc/secfixes.d/alpine                                       97 B -> 97 B  content changed
+~ /etc/ssl/certs/ca-certificates.crt                           212.7 KiB -> 174.6 KiB  content changed
+~ /lib/apk/db/installed                                        13.9 KiB -> 14.5 KiB  content changed
+~ /lib/apk/db/scripts.tar                                      10.0 KiB -> 10.0 KiB  content changed
+~ /lib/apk/db/triggers                                         76 B -> 95 B  content changed
+~ /lib/ld-musl-x86_64.so.1                                     634.6 KiB -> 646.6 KiB  content changed
+- /lib/libapk.so.2.14.0                                         179.7 KiB
+- /lib/libcrypto.so.3                                             4.3 MiB
+- /lib/libssl.so.3                                              783.7 KiB
+- /lib/libz.so.1                                                      0 B
+- /lib/libz.so.1.3.2                                            101.9 KiB
+- /lib/sysctl.d/00-alpine.conf                                    1.2 KiB
++ /run/lock                                                           0 B
+~ /sbin/apk                                                    68.0 KiB -> 68.0 KiB  content changed
+~ /usr/bin/getconf                                             34.5 KiB -> 34.6 KiB  content changed
+~ /usr/bin/getent                                              43.8 KiB -> 43.8 KiB  content changed
+~ /usr/bin/iconv                                               23.9 KiB -> 23.9 KiB  content changed
+~ /usr/bin/scanelf                                             66.0 KiB -> 65.9 KiB  content changed
+~ /usr/bin/ssl_client                                          14.1 KiB -> 14.0 KiB  content changed
+~ /usr/lib/engines-3/afalg.so                                  18.1 KiB -> 18.1 KiB  content changed
+~ /usr/lib/engines-3/capi.so                                   13.5 KiB -> 13.5 KiB  content changed
+~ /usr/lib/engines-3/loader_attic.so                           46.5 KiB -> 46.5 KiB  content changed
+~ /usr/lib/engines-3/padlock.so                                21.8 KiB -> 21.8 KiB  content changed
++ /usr/lib/libapk.so.2.14.0                                     179.7 KiB
+~ /usr/lib/libcrypto.so.3                                      0 B -> 4.3 MiB  kind Symlink -> File
+~ /usr/lib/libssl.so.3                                         0 B -> 779.7 KiB  kind Symlink -> File
++ /usr/lib/libz.so.1                                                  0 B
++ /usr/lib/libz.so.1.3.2                                        101.8 KiB
++ /usr/lib/os-release                                               188 B
+~ /usr/lib/ossl-modules/legacy.so                              93.8 KiB -> 93.8 KiB  content changed
++ /usr/lib/sysctl.d                                                   0 B
++ /usr/lib/sysctl.d/00-alpine.conf                                1.2 KiB
++ /usr/share/apk/keys/alpine-devel@lists.alpinelinux.org-66ba20fe.rsa.pub      800 B
++ /usr/share/apk/keys/loongarch64                                     0 B
++ /usr/share/apk/keys/loongarch64/alpine-devel@lists.alpinelinux.org-66ba20fe.rsa.pub        0 B
+~ /var/lock                                                    0 B -> 0 B  kind Dir -> Symlink
+- /var/lock/subsys                                                    0 B
+~ /var/run                                                     0 B -> 0 B  symlink target /run -> ../run
+~ /var/spool/cron/crontabs                                     0 B -> 0 B  symlink target /etc/crontabs -> ../../../etc/crontabs
+~ /var/spool/mail                                              0 B -> 0 B  symlink target /var/mail -> ../mail
+
+alpine:3.21 differs from alpine:3.20 by 47 files: 10 added, 7 removed, 30 modified, 0 metadata-only — 7.4 MiB of new content (480 files unchanged)
+
+brut complet : /home/nboukadoum-ext/mycel/bench/image-compare/results/raw.txt
