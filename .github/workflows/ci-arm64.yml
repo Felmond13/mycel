@@ -1,0 +1,88 @@
+name: CI arm64
+
+# Continuous aarch64 validation on GitHub's free arm64 runners (public
+# repos — label `ubuntu-24.04-arm`, 4 vCPU / 16 GB). Two jobs:
+#
+# - check-aarch64: the full fmt + clippy + test suite from ci.yml, on the
+#   aarch64 toolchain. This is what proves the WHOLE workspace compiles
+#   and passes its tests on aarch64 — including myc-run's nix/libc mount
+#   code, which is exactly what blocked a cross-build in release.yml's
+#   old TODO(aarch64). Runs on every push to main (lean: no PR trigger —
+#   PRs are already covered by the x86_64 suite; arch divergence lands on
+#   main only) and on demand.
+#
+# - guest-assets-aarch64: builds the aarch64 guest kernel + initramfs
+#   (same scripts the release tag job runs, ARCH=aarch64). Manual only
+#   (workflow_dispatch): it downloads a ~140 MB kernel tarball and runs a
+#   full build, too heavy for every push. It exists so the release.yml
+#   arm64 asset job — which only runs on tags and therefore cannot be
+#   tested without cutting a release — is never a blind bet.
+#
+# HONEST SCOPE (project LOI: no unmeasured claims): this workflow
+# validates that things COMPILE and tests PASS on aarch64. The kvm-microvm
+# engine still executes x86_64 guests only (crates/myc-backend/src/kvm.rs
+# guard); no arm64 boot/e2e/performance claim is made or implied here.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check-aarch64:
+    name: fmt + clippy + tests (aarch64)
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: cargo fmt --check
+        run: cargo fmt --all --check
+
+      - name: cargo clippy -D warnings
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: cargo test --workspace
+        # Same suite the x86_64 CI runs on a plain ubuntu-latest runner
+        # (no nested /dev/kvm there either): unit/integration tests do not
+        # need KVM. If an environment-specific failure ever appears here,
+        # scope it down explicitly in this job and document why — do not
+        # silently delete steps.
+        run: cargo test --workspace
+
+  guest-assets-aarch64:
+    name: guest kernel + initramfs build (aarch64)
+    runs-on: ubuntu-24.04-arm
+    if: github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential flex bison bc libelf-dev libssl-dev cpio busybox-static xz-utils file
+
+      - name: Build guest kernel (vmlinux-vmfs-aarch64)
+        run: |
+          chmod +x bench/microvm/build_kernel_vmfs.sh bench/microvm/mkinit-vm.sh
+          ARCH=aarch64 bench/microvm/build_kernel_vmfs.sh
+
+      - name: Build guest initramfs (init-vm-aarch64.cpio)
+        run: ARCH=aarch64 bench/microvm/mkinit-vm.sh
+
+      - name: Verify outputs + sidecar-shaped checksums
+        run: |
+          cd bench/microvm/assets
+          ls -l vmlinux-vmfs-aarch64 init-vm-aarch64.cpio
+          file vmlinux-vmfs-aarch64 init-vm-aarch64.cpio
+          sha256sum vmlinux-vmfs-aarch64 init-vm-aarch64.cpio
