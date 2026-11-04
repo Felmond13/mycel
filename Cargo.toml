@@ -13,6 +13,7 @@ members = [
     "crates/myc-build",
     "crates/myc-backend",
     "crates/myc-chunk",
+    "crates/myc-delta",
     "crates/myc-cli",
 ]
 

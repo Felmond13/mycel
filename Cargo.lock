@@ -961,6 +961,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "myc-delta"
+version = "0.2.0"
+dependencies = [
+ "blake3",
+ "myc-chunk",
+ "thiserror",
+]
+
+[[package]]
 name = "myc-hub"
 version = "0.2.0"
 dependencies = [
@@ -1058,12 +1067,14 @@ dependencies = [
  "flate2",
  "fs2",
  "hex",
+ "myc-chunk",
  "myc-manifest",
  "serde",
  "serde_json",
  "tar",
  "tempfile",
  "thiserror",
+ "zstd",
 ]
 
 [[package]]
