@@ -11,6 +11,13 @@
 #
 # Différences avec mkinitramfs.sh (bench) : pas de benchhttp, pas d'IP fixe
 # codée en dur (mycip= sur la cmdline), montage du vrai rootfs + switch_root.
+#
+# Branche mycagent=1 (chemin snapshot Firecracker) : le rootfs ext4 est
+# monté LECTURE SEULE (l'image est un cache partagé entre les runs, clé par
+# empreinte) et recouvert d'un overlay tmpfs rw — /myc/init-guest y est
+# l'« agent » qui attend la commande sur le disque scratch (/dev/vdb),
+# réécrit par l'hôte pendant que la VM est en pause. Le même cpio sert les
+# deux chemins (kvm.rs ajoute mycagent=1 à la cmdline pour Firecracker).
 set -euo pipefail
 
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -25,7 +32,9 @@ mkdir -p "$STAGE/bin" "$STAGE/proc" "$STAGE/sys" "$STAGE/dev" "$STAGE/newroot"
 
 cp /usr/bin/busybox "$STAGE/bin/busybox"
 # Applets utilisés par /init (stage 1) — généreux plutôt que minimal.
-for applet in sh mount switch_root mkdir cat sleep ip grep printf sync poweroff dd hostname awk sed ls mknod chmod; do
+# blockdev (l'agent invalide le cache page du scratch entre deux lectures)
+# et reboot (Firecracker sort au reboot du guest, il n'a pas d'ACPI S5).
+for applet in sh mount switch_root mkdir cat sleep ip grep printf sync poweroff reboot dd hostname awk sed ls mknod chmod blockdev; do
   ln -sf busybox "$STAGE/bin/$applet"
 done
 
@@ -41,7 +50,7 @@ cat > "$STAGE/init" <<'EOF'
 # (mycroot=virtiofs|ext4 sur la cmdline kernel), configure l'IP fixe guest
 # si mycip= est présent (ports publiés : DNAT hôte vers cette IP), puis
 # switch_root vers /myc/init-guest (stage 2). Boucles de réessai courtes :
-# les devices virtio-pci peuvent apparaître un instant après /init.
+# les devices virtio peuvent apparaître un instant après /init.
 export PATH=/bin
 
 mkdir -p /proc /sys /dev /newroot
@@ -52,10 +61,12 @@ ip link set lo up 2>/dev/null
 
 root="virtiofs"
 ipaddr=""
+agent=0
 for x in $(cat /proc/cmdline); do
   case "$x" in
     mycroot=*) root=${x#mycroot=} ;;
     mycip=*) ipaddr=${x#mycip=} ;;
+    mycagent=1) agent=1 ;;
   esac
 done
 
@@ -65,6 +76,31 @@ if [ -n "$ipaddr" ]; then
     sleep 0.05; i=$((i+1))
   done
   ip addr add "$ipaddr/24" dev eth0 2>/dev/null
+fi
+
+# ---- chemin snapshot Firecracker : ext4 RO + overlay tmpfs RW ------------
+# L'image rootfs est un cache partagé (jamais écrite par les guests) ; le
+# tmpfs /upper sert de upperdir/workdir à l'overlay. busybox switch_root ne
+# supprime pas les points de montage (test st_dev) : le tmpfs et l'ext4
+# restent vivants sous la nouvelle racine, référencés par l'overlay.
+if [ "$agent" = "1" ]; then
+  i=0
+  while [ "$i" -lt 300 ] && ! [ -b /dev/vda ]; do
+    sleep 0.05; i=$((i+1))
+  done
+  mkdir -p /upper /newroot2
+  if [ -b /dev/vda ] \
+     && mount -t ext4 -o ro /dev/vda /newroot 2>/dev/null \
+     && mount -t tmpfs tmpfs /upper 2>/dev/null \
+     && mkdir -p /upper/up /upper/work \
+     && mount -t overlay overlay \
+          -o lowerdir=/newroot,upperdir=/upper/up,workdir=/upper/work \
+          /newroot2 2>/dev/null; then
+    mkdir -p /newroot2/proc /newroot2/sys /newroot2/dev /newroot2/tmp /newroot2/run 2>/dev/null
+    exec switch_root /newroot2 /myc/init-guest
+  fi
+  echo "myc-init: agent rootfs illisible (ext4/overlay, /dev/vda=$([ -b /dev/vda ] && echo oui || echo non))" > /dev/console
+  reboot -f
 fi
 
 mounted=""
