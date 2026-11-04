@@ -573,6 +573,10 @@ while [ "$i" -lt 6000 ]; do
       j=$((j+1))
     done
     [ -n "$MYC_HOSTNAME" ] && "$BB" hostname "$MYC_HOSTNAME" 2>/dev/null
+    if [ -n "$MYC_DNS" ]; then
+      mkdir -p /etc 2>/dev/null
+      for d in $MYC_DNS; do echo "nameserver $d"; done > /etc/resolv.conf 2>/dev/null
+    fi
     if [ -n "$MYC_WORKDIR" ]; then
       mkdir -p "$MYC_WORKDIR" 2>/dev/null
       cd "$MYC_WORKDIR" 2>/dev/null
@@ -1238,7 +1242,10 @@ fn run_vm(g: &mut FcRun, mode: Mode, ctx: &AttemptCtx) -> AttemptResult {
                 "console=ttyS0 quiet loglevel=3 reboot=k panic=1 mycroot=ext4 mycagent=1{}",
                 g.lease
                     .as_ref()
-                    .map(|l| format!(" mycip={}", l.ip_str))
+                    .map(|l| {
+                        let gw = crate::kvm::bridge_gateway();
+                        format!(" mycip={} mycgw={}", l.ip_str, gw)
+                    })
                     .unwrap_or_default()
             );
             let boot = serde_json::json!({
@@ -1593,7 +1600,12 @@ pub fn snapshot_run(
             .map(|p| (*p, *p))
             .collect();
     }
-    let with_net = !ports.is_empty();
+    // Networked whenever the run is not isolated: bridge + egress NAT give
+    // outbound internet even without published ports (docker daemon
+    // semantics). Root only — bridge/tap need it; a non-root no-port run
+    // keeps the offline VM rather than a hard error, and non-root port
+    // publishing still fails below with the fix hint.
+    let with_net = !request.isolated_network && (is_root() || !ports.is_empty());
     if with_net && !is_root() {
         return unavail("publishing ports needs root (bridge, tap, DNAT)".into());
     }
@@ -1729,6 +1741,7 @@ pub fn snapshot_run(
         hostname,
         binds: Vec::new(),
         exit_dev: "/dev/vdb".into(),
+        dns: crate::kvm::guest_dns(),
     });
     if payload.len() + 8 > CMD_BLOCK {
         return unavail(format!(

@@ -112,11 +112,16 @@ rules — measured). `127.0.0.1` clients are served by a userland TCP relay
 (`portproxy.rs`, the docker-proxy pattern) because WSL2's kernel never
 applies `nat OUTPUT` DNAT to loopback-sourced SYNs (verified with
 tcpdump). Tap/bridge/iptables need root — exactly like the Docker daemon;
-runs without ports need no privileges at all. A run whose image exposes
-no ports (and no `-p`) boots with NO network device: there is no egress
-NAT yet, so a workload that needs outbound connectivity (`apk add`,
-`curl`) inside the VM must publish a port — or run with
-`--engine native-namespaces`.
+runs without ports need no privileges at all. Root runs are networked
+even without published ports: the guest gets a default route (kernel
+cmdline `mycgw=`), the host forwards and masquerades the bridge /24 out
+of the default-route interface (tagged `myc-egress` rules; the FORWARD
+pair matters because Docker's DROP policy shadows nothing inserted after
+it — measured), and `/etc/resolv.conf` is rewritten per run from
+`MYC_DNS` (host resolvers, `MYCEL_VM_DNS` to override). Measured inside
+the VM: `apk add curl` + HTTPS 200 from a snapshot-restored guest.
+Non-root runs without ports stay offline (bridge/tap need root — same
+line as the Docker daemon).
 
 Validation (`bench/microvm/e2e-vm.sh`, replayable, delta-based residue
 assertions): **27/27 PASS** — echo/env/bind ro (+ write refused)/exit
@@ -133,10 +138,9 @@ latency-critical paths.
 Known limits (v1): `--map-user` ignored (workloads run as guest root);
 x86_64 guests only (aarch64: binary + guest assets published, engine
 wiring pending hardware validation — see the distribution note); one /24 bridge (`MYCEL_VM_CIDR`, 253 concurrent
-networked guests); no guest egress NAT — a VM without published ports is
-offline, so `auto` keeps pasta-isolated and rootless-port-publishing runs
-native, and a plain `--net host` run inside the VM has no outbound
-network (use `--engine native-namespaces` when the workload needs it);
+networked guests); non-root no-port runs boot offline (root runs get
+egress NAT — see above; `auto` still keeps pasta-isolated and
+rootless-port-publishing runs native);
 `--join-net`/`--lazy`/`--run-dir` refused on this engine (the auto policy
 falls back to namespaces for them, with the reason on stderr); PID 1 does
 not reap orphaned grandchildren; a SIGKILLed `myc` bypasses cleanup
@@ -210,8 +214,10 @@ machine). Raw measurement files live in each bench `results/` directory
    virtiofs + voie A ext4, e2e 27/27). ~~`kvm-microvm` becomes the Linux
    default~~ **done** — the `auto` policy picks it whenever READY and the
    request is compatible (§ Automatic selection). Remaining hardening:
-   PID-1 reaping, `--map-user`, guest egress NAT (a VM without published
-   ports is offline), and reproducing the e2e suite on native KVM.
+   PID-1 reaping, `--map-user`, and reproducing the e2e suite on native
+   KVM. ~~Guest egress NAT~~ **done** — root runs are networked without
+   published ports (default route + MASQUERADE + per-run DNS; measured
+   with `apk add curl` from a snapshot-restored guest).
 2. macOS tier via libkrun (KVM + Hypervisor.framework in one code path —
    the reason libkrun is the preferred vehicle long-term).
 3. Snapshot/restore on the microVM tier: Firecracker path validated under

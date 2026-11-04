@@ -83,6 +83,7 @@ for x in $(cat /proc/cmdline); do
   case "$x" in
     mycroot=*) root=${x#mycroot=} ;;
     mycip=*) ipaddr=${x#mycip=} ;;
+  mycgw=*) gw=${x#mycgw=} ;;
     mycagent=1) agent=1 ;;
   esac
 done
@@ -93,6 +94,9 @@ if [ -n "$ipaddr" ]; then
     sleep 0.05; i=$((i+1))
   done
   ip addr add "$ipaddr/24" dev eth0 2>/dev/null
+  # Default route through the bridge gateway: un-published runs get
+  # outbound network (host side masquerades, see kvm.rs egress_nat).
+  [ -n "${gw:-}" ] && ip route add default via "$gw" dev eth0 2>/dev/null
 fi
 
 # ---- chemin snapshot Firecracker : ext4 RO + overlay tmpfs RW ------------

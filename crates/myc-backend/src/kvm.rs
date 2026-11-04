@@ -505,7 +505,11 @@ impl KvmMicroVm {
             .arg("--kernel")
             .arg(&kernel)
             .arg("--cmdline")
-            .arg(format!("console=hvc0 quiet mycip={}", lease.ip_str))
+            .arg(format!(
+                "console=hvc0 quiet mycip={} mycgw={}",
+                lease.ip_str,
+                dotted(net.host_ip)
+            ))
             .arg("--initramfs")
             .arg(&initramfs)
             .arg("--cpus")
@@ -641,6 +645,9 @@ pub(crate) struct GuestSpec {
     /// voie B where scratch is the only disk, `/dev/vdb` on voie A where
     /// vda is the read-only root image).
     pub(crate) exit_dev: String,
+    /// Nameservers written to the guest /etc/resolv.conf at run time (sent
+    /// in run.env, so a restored snapshot always gets the current ones).
+    pub(crate) dns: Vec<String>,
 }
 
 /// Guest environment, most general first (the guest exports in order, so
@@ -677,6 +684,7 @@ mount -t proc proc /proc 2>/dev/null
 mount -t sysfs sysfs /sys 2>/dev/null
 mount -t devtmpfs devtmpfs /dev 2>/dev/null
 [ -n "$MYC_HOSTNAME" ] && hostname "$MYC_HOSTNAME" 2>/dev/null
+[ -n "$MYC_DNS" ] && { mkdir -p /etc 2>/dev/null; for d in $MYC_DNS; do echo "nameserver $d"; done > /etc/resolv.conf 2>/dev/null; }
 i=0
 while [ "$i" -lt "$MYC_BIND_N" ]; do
   eval "tag=\$MYC_BIND_TAG_$i"
@@ -733,6 +741,9 @@ pub(crate) fn run_env_content(spec: &GuestSpec) -> String {
             .unwrap_or_else(|| "''".into())
     ));
     out.push_str(&format!("MYC_HOSTNAME={}\n", sh_quote(&spec.hostname)));
+    if !spec.dns.is_empty() {
+        out.push_str(&format!("MYC_DNS={}\n", sh_quote(&spec.dns.join(" "))));
+    }
     out.push_str(&format!("MYC_BIND_N={}\n", spec.binds.len()));
     for (i, b) in spec.binds.iter().enumerate() {
         out.push_str(&format!("MYC_BIND_TAG_{i}={}\n", sh_quote(&b.tag)));
@@ -1045,7 +1056,168 @@ pub(crate) fn ensure_bridge(net: &VmNet) -> Result<()> {
         )));
     }
     let _ = ip_run(&["link", "set", BRIDGE_NAME, "up"]);
+    // Guest egress: forward + masquerade the bridge subnet out of the
+    // default-route interface (docker0 semantics). Idempotent — the
+    // bridge persists across runs, so does the rule; skipped when the
+    // host has no default route (offline).
+    egress_nat(net);
     Ok(())
+}
+
+/// Host nameservers offered to guests: `MYCEL_VM_DNS` wins; else the
+/// host's non-loopback /etc/resolv.conf entries (a 127.x resolver is
+/// unreachable from a guest); else public fallbacks so DNS still works.
+pub(crate) fn guest_dns() -> Vec<String> {
+    if let Ok(v) = std::env::var("MYCEL_VM_DNS") {
+        let list: Vec<String> = v.split_whitespace().map(str::to_owned).collect();
+        if !list.is_empty() {
+            return list;
+        }
+    }
+    let mut ns: Vec<String> = std::fs::read_to_string("/etc/resolv.conf")
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|l| l.strip_prefix("nameserver"))
+        .map(str::trim)
+        .filter(|s| !s.is_empty() && !s.starts_with("127."))
+        .map(str::to_owned)
+        .collect();
+    ns.dedup();
+    if ns.is_empty() {
+        ns = vec!["1.1.1.1".into(), "8.8.8.8".into()];
+    }
+    ns
+}
+
+/// The bridge gateway as a dotted string, even when MYCEL_VM_CIDR is
+/// invalid (the default keeps guests routable on the fallback subnet).
+pub(crate) fn bridge_gateway() -> String {
+    vm_net()
+        .map(|n| dotted(n.host_ip))
+        .unwrap_or_else(|_| "192.168.77.1".into())
+}
+
+/// First default-route interface (`ip route show default`), if any.
+fn default_iface() -> Option<String> {
+    let out = Command::new("ip")
+        .args(["route", "show", "default"])
+        .stdin(Stdio::null())
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    text.lines()
+        .find(|l| l.starts_with("default"))
+        .and_then(|l| {
+            let mut parts = l.split_whitespace();
+            loop {
+                match parts.next() {
+                    Some("dev") => return parts.next().map(str::to_owned),
+                    Some(_) => continue,
+                    None => return None,
+                }
+            }
+        })
+}
+
+/// Enable IPv4 forwarding (only when off) and install one tagged
+/// MASQUERADE rule for the bridge subnet. Best-effort by design: an
+/// offline host simply keeps its VMs offline, exactly like before.
+fn egress_nat(net: &VmNet) {
+    let fwd = Command::new("sysctl")
+        .args(["-n", "net.ipv4.ip_forward"])
+        .stdin(Stdio::null())
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim() == "1")
+        .unwrap_or(false);
+    if !fwd {
+        let _ = Command::new("sysctl")
+            .args(["-w", "net.ipv4.ip_forward=1"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+    let Some(dev) = default_iface() else { return };
+    let ipt = iptables_bin();
+    // `iptables -C` is unusable here: on nft-compat hosts it can exit 0
+    // while printing "Bad rule" on stderr. Scan the chain listing instead
+    // (same technique as purge_tag_rules).
+    let listed = Command::new(&ipt)
+        .args(["-t", "nat", "-S", "POSTROUTING"])
+        .stdin(Stdio::null())
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+        .unwrap_or_default();
+    let filter_listed = Command::new(&ipt)
+        .args(["-t", "filter", "-S", "FORWARD"])
+        .stdin(Stdio::null())
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+        .unwrap_or_default();
+    if listed.lines().any(|l| l.contains("--comment myc-egress"))
+        && filter_listed
+            .lines()
+            .any(|l| l.contains("--comment myc-egress"))
+    {
+        return; // already installed
+    }
+    // FORWARD is often policy-DROP (Docker's default): without these two,
+    // forwarded guest packets die silently between the bridge and eth0.
+    for rule in [
+        vec![
+            "-A",
+            "FORWARD",
+            "-s",
+            &net.cidr,
+            "-o",
+            &dev,
+            "-m",
+            "comment",
+            "--comment",
+            "myc-egress",
+            "-j",
+            "ACCEPT",
+        ],
+        vec![
+            "-A",
+            "FORWARD",
+            "-d",
+            &net.cidr,
+            "-i",
+            &dev,
+            "-m",
+            "comment",
+            "--comment",
+            "myc-egress",
+            "-m",
+            "conntrack",
+            "--ctstate",
+            "ESTABLISHED,RELATED",
+            "-j",
+            "ACCEPT",
+        ],
+    ] {
+        let args: Vec<String> = rule.iter().map(|s| s.to_string()).collect();
+        let _ = iptables_run(&ipt, &args); // tagged: purge_tag_rules cleans up
+    }
+    let add = [
+        "-t",
+        "nat",
+        "-A",
+        "POSTROUTING",
+        "-s",
+        &net.cidr,
+        "-o",
+        &dev,
+        "-m",
+        "comment",
+        "--comment",
+        "myc-egress",
+        "-j",
+        "MASQUERADE",
+    ]
+    .map(String::from);
+    iptables_run(&ipt, &add);
 }
 
 /// One guest slot on the bridge: sequential IP, matching tap and MAC.
@@ -1874,7 +2046,12 @@ impl ExecBackend for KvmMicroVm {
                 .map(|p| (*p, *p))
                 .collect();
         }
-        let with_net = !ports.is_empty();
+        // Networked whenever the run is not isolated: bridge + egress NAT
+        // give outbound internet even without published ports (docker
+        // daemon semantics). Root only — bridge/tap need it; a non-root
+        // no-port run keeps the offline VM rather than a hard error, and
+        // non-root port publishing still fails below with the fix hint.
+        let with_net = !request.isolated_network && (is_root() || !ports.is_empty());
         if with_net && !is_root() {
             return Err(BackendError::Unavailable(
                 "the kvm-microvm engine needs root to publish ports (bridge, tap, \
@@ -1914,6 +2091,7 @@ impl ExecBackend for KvmMicroVm {
             } else {
                 "/dev/vda".into() // the scratch disk is the only disk
             },
+            dns: guest_dns(),
         };
         write_guest_files(&rootfs, &spec)?;
         step("guest files", &mut mark);
@@ -2018,8 +2196,12 @@ impl ExecBackend for KvmMicroVm {
             None
         };
         let mut cmdline = format!("console=hvc0 quiet loglevel=3 {root_arg}");
-        if let Some((_, lease)) = &net_lease {
-            cmdline.push_str(&format!(" mycip={}", lease.ip_str));
+        if let Some((net, lease)) = &net_lease {
+            cmdline.push_str(&format!(
+                " mycip={} mycgw={}",
+                lease.ip_str,
+                dotted(net.host_ip)
+            ));
         }
         let mem = std::env::var("MYCEL_VM_MEM").unwrap_or_else(|_| DEFAULT_VM_MEM.into());
         let mut ch_cmd = Command::new(&self.ch_bin);
@@ -2435,6 +2617,7 @@ mod tests {
                 read_only: true,
             }],
             exit_dev: "/dev/vdb".into(),
+            dns: Vec::new(),
         };
         let env_file = run_env_content(&spec);
         for expected in [
@@ -2473,6 +2656,7 @@ mod tests {
             hostname: "mycel".into(),
             binds: vec![],
             exit_dev: "/dev/vda".into(),
+            dns: Vec::new(),
         };
         let json = run_json_content(&spec);
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
