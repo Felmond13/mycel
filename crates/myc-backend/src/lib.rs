@@ -68,7 +68,8 @@ impl EngineKind {
                 "published ports (-p) and the br-myc bridge need a root myc",
                 "networked VMs share one /24 bridge (253 guests, MYCEL_VM_CIDR)",
                 "--map-user ignored in v1 (workloads run as guest root)",
-                "x86_64 guests only (multi-arch not wired)",
+                "x86_64 guests only (aarch64: binaries + guest assets published, \
+                 engine wiring pending hardware validation)",
             ],
             Self::HypervisorFramework => &["architecture only (see docs/desktop-architecture.md)"],
             Self::Wsl2 => &["containers execute inside the WSL2 Linux twin"],

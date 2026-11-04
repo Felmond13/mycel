@@ -78,6 +78,17 @@ pub const DEFAULT_MKFS_EXT4: &str = "/usr/sbin/mkfs.ext4";
 /// iptables (nft backend is fine) — published ports only.
 pub const DEFAULT_IPTABLES: &str = "/usr/sbin/iptables";
 
+/// The engine executes **x86_64 guests** through Cloud Hypervisor. The
+/// aarch64 *distribution* exists (release binaries `myc-linux-aarch64`
+/// and guest assets `vmlinux-vmfs-aarch64` / `init-vm-aarch64.cpio`,
+/// built by the same scripts with `ARCH=aarch64`), but the engine itself
+/// has not been wired nor validated on arm64 hardware: no boot, no e2e,
+/// no number has been measured there. Rather than pretending, the engine
+/// reports itself unavailable on non-x86_64 hosts (`myc doctor` shows
+/// the honest per-check reason). Compile-time constant: on x86_64 builds
+/// every gate below folds away — zero behavior change.
+const ENGINE_ARCH_SUPPORTED: bool = cfg!(target_arch = "x86_64");
+
 /// Guest subnet of the microVM network, a /24: the bridge holds `<base>.1`
 /// and each VM leases `<base>.2`, `<base>.3`, … Override with
 /// `MYCEL_VM_CIDR` (a /24 only — the generic guest initramfs configures a
@@ -300,8 +311,12 @@ impl KvmMicroVm {
     }
 
     /// True when `run()` can execute environments right now (either voie).
+    /// On non-x86_64 hosts this is always false: the engine wiring is
+    /// x86_64-only (see [`ENGINE_ARCH_SUPPORTED`]) — aarch64 guests have
+    /// published assets but no validated engine.
     fn engine_available(&self) -> bool {
-        Self::kvm_usable()
+        ENGINE_ARCH_SUPPORTED
+            && Self::kvm_usable()
             && Self::file_exists(&self.ch_bin)
             && Self::file_exists(&self.ch_remote)
             && Self::file_exists(&self.vm_kernel)
@@ -366,6 +381,15 @@ impl KvmMicroVm {
     /// ARP entry; [`RunningVm::wait_ready`] then waits until the guest
     /// accepts TCP on `<lease-ip>:GUEST_PORT`.
     pub fn launch(&self, initramfs: &Path) -> Result<RunningVm> {
+        // Same honest arch gate as `run()` (folded away on x86_64 builds):
+        // the bench path is no more wired on aarch64 than the engine path.
+        if !ENGINE_ARCH_SUPPORTED {
+            return Err(BackendError::Unavailable(
+                "kvm-microvm executes x86_64 guests only — on aarch64 the guest assets are \
+                 published but the engine wiring is pending hardware validation"
+                    .into(),
+            ));
+        }
         if !Self::kvm_usable() {
             return Err(BackendError::Unavailable(
                 "/dev/kvm is not usable (missing, or no permission — try the kvm group)".into(),
@@ -1598,6 +1622,30 @@ impl ExecBackend for KvmMicroVm {
             },
             subnet_check,
         ];
+        // Non-x86_64 hosts: state the real reason up front instead of a
+        // wall of failing binary checks. The aarch64 pipeline publishes
+        // the guest assets, but no engine run has been validated there —
+        // `myc doctor` must say exactly that (no simulated availability).
+        let mut checks = checks;
+        if !ENGINE_ARCH_SUPPORTED {
+            checks.insert(
+                0,
+                BackendCheck {
+                    name: "guest arch".into(),
+                    ok: false,
+                    detail: format!(
+                        "{} host — aarch64 guests: assets published (vmlinux-vmfs-aarch64, \
+                         init-vm-aarch64.cpio), engine wiring pending hardware validation",
+                        std::env::consts::ARCH
+                    ),
+                    fix: Some(
+                        "use the default native-namespaces engine on aarch64; kvm-microvm \
+                         executes x86_64 guests only today"
+                            .into(),
+                    ),
+                },
+            );
+        }
         BackendReport {
             backend: self.name().to_string(),
             available: self.engine_available(),
@@ -1619,6 +1667,17 @@ impl ExecBackend for KvmMicroVm {
         };
 
         // --- prerequisites ----------------------------------------------
+        // Arch gate first: on aarch64 nothing below is wired (and the
+        // auto-provision would fetch the x86_64 guest kernel — worse than
+        // useless). Folded away entirely on x86_64 builds.
+        if !ENGINE_ARCH_SUPPORTED {
+            return Err(BackendError::Unavailable(
+                "kvm-microvm executes x86_64 guests only — on aarch64 the guest assets are \
+                 published but the engine wiring is pending hardware validation (see \
+                 `myc doctor`)"
+                    .into(),
+            ));
+        }
         if !Self::kvm_usable() {
             return Err(BackendError::Unavailable(
                 "/dev/kvm is not usable (missing, or no permission — try the kvm group)".into(),
