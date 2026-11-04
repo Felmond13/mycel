@@ -12,7 +12,7 @@ set -euo pipefail
 
 HERE=$(cd "$(dirname "$0")" && pwd)
 cd "$HERE"
-RESULTS=results
+RESULTS=${RESULTS:-results}
 RUNS=${RUNS:-30}
 WARMUPS=${WARMUPS:-5}
 
@@ -38,6 +38,11 @@ mkdir -p "$RESULTS"
   echo "--- SHA-256 ---"
   sha256sum assets/vmlinux assets/rootfs.cpio assets/benchhttp 2>/dev/null
   cat assets/vmlinux.version 2>/dev/null
+  echo "--- guest kernel in use (MYCEL_KERNEL=${MYCEL_KERNEL:-<unset>}) ---"
+  KERNEL_IN_USE=${MYCEL_KERNEL:-/usr/local/share/mycel/vmlinux}
+  ls -l "$KERNEL_IN_USE" 2>/dev/null
+  sha256sum "$KERNEL_IN_USE" 2>/dev/null
+  cat "${KERNEL_IN_USE}.version" 2>/dev/null || true
   git -C "$HERE/../.." rev-parse HEAD 2>/dev/null || true
 } > "$RESULTS/env.txt" 2>&1
 

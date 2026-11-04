@@ -30,6 +30,25 @@ case "$SCN" in
     "$BOOT" "$ASSETS/rootfs.cpio" 2>/dev/null &
     PID=$!
     URL="http://192.168.77.2:8080/"
+
+    # Réchauffe ICMP (anti-outlier ~9 s, cf. microvm-boot.md § v2) : le noyau
+    # invité répond à l'ICMP echo dès qu'eth0 a son IP — aucun userspace
+    # requis. On n'émet donc AUCUN SYN tant que l'invité n'a pas répondu à un
+    # ping : un SYN parti avant le montage d'eth0 est jeté silencieusement
+    # (entrée ARP permanente) et le backoff TCP le retarde de ~9 s. Flux
+    # continu à 50 Hz plutôt que des ping one-shot : ici -W est en SECONDES
+    # (iputils 20250605), un one-shot échoué bloque donc 1 s plein ; le flux
+    # + grep -m1 détecte la première réponse en ~20 ms. Reprises tant que le
+    # tap n'existe pas encore (ping sort aussitôt : réseau inaccessible).
+    # T0 reste le lancement : cette phase est DANS le délai mesuré, comme le
+    # reste du boot — elle n'est pas chronométrée séparément.
+    WARM_DEADLINE=$((SECONDS + 10))
+    while [ "$SECONDS" -lt "$WARM_DEADLINE" ]; do
+      if timeout 1 ping -n -i 0.02 192.168.77.2 2>/dev/null | grep -m1 -q 'bytes from'; then
+        break
+      fi
+      sleep 0.05
+    done
     ;;
   *)
     echo "scenario inconnu : $SCN" >&2

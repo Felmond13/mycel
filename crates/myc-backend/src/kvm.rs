@@ -287,9 +287,20 @@ pub struct RunningVm {
 impl RunningVm {
     /// Block until the guest accepts TCP on the bench port, or `timeout`
     /// elapses. Returns how long the guest took to become reachable.
+    ///
+    /// ICMP-first: a TCP SYN sent before the guest brings eth0 up is
+    /// silently dropped (the permanent ARP entry means no resolution
+    /// failure either), and the host's SYN retransmission backoff
+    /// (~1+2+4 s) turns a sub-second boot into a multi-second outlier
+    /// (campaign v2: 2/60 runs at ~9 s). The guest *kernel* answers ICMP
+    /// echo as soon as eth0 has its address — no guest userspace needed —
+    /// so we stream cheap pings until the first reply, and only then start
+    /// connecting. If `ping` is missing the phase is skipped and the plain
+    /// TCP probe loop below still works.
     pub fn wait_ready(&self, timeout: Duration) -> Result<Duration> {
         let start = Instant::now();
         let deadline = start + timeout;
+        self.wait_guest_link_up(start + timeout.min(Duration::from_secs(10)));
         let addr = SocketAddr::from((GUEST_IP, GUEST_PORT));
         loop {
             if TcpStream::connect_timeout(&addr, Duration::from_millis(50)).is_ok() {
@@ -301,6 +312,59 @@ impl RunningVm {
                 ));
             }
             thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    /// Stream one ICMP echo every 20 ms until the guest replies (first
+    /// `bytes from` line), then return. Bounded by `until`; re-spawns the
+    /// pinger while the tap does not exist yet (ping exits immediately
+    /// with "network unreachable"). Best effort: any spawn failure ends
+    /// the phase early and defers to TCP probing.
+    fn wait_guest_link_up(&self, until: Instant) {
+        use std::io::{BufRead, BufReader};
+        while Instant::now() < until {
+            let remaining = (until - Instant::now()).as_secs().max(1);
+            let child = Command::new("ping")
+                .args([
+                    "-n",
+                    "-i",
+                    "0.02",
+                    "-w",
+                    &remaining.to_string(),
+                    GUEST_IP_STR,
+                ])
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .spawn();
+            let mut child = match child {
+                Ok(c) => c,
+                // No ping on this host — not fatal, the TCP loop still probes.
+                Err(_) => return,
+            };
+            let mut answered = false;
+            if let Some(out) = child.stdout.take() {
+                // One line per reply (iputils flushes per packet); the loop
+                // ends on `-w` expiry, so the deadline above is honored.
+                for line in BufReader::new(out).lines() {
+                    match line {
+                        Ok(l) if l.contains("bytes from") => {
+                            answered = true;
+                            break;
+                        }
+                        Ok(_) => {}
+                        Err(_) => break,
+                    }
+                }
+            }
+            let _ = child.kill();
+            let _ = child.wait();
+            if answered {
+                return;
+            }
+            // Either the tap is not up yet or the guest is still mute:
+            // brief pause, then stream again.
+            thread::sleep(Duration::from_millis(50));
         }
     }
 
