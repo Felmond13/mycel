@@ -180,7 +180,7 @@ Everything is backed by the JSON API documented in `docs/web-api.md`.
 Interactive shells (`myc shell`) stay in the terminal; the UI runs
 services and one-shot commands.
 
-*(screenshot placeholder: docs/ui-screenshot.png)*
+![mycel dashboard — apps, one-shot run, store dedup, snapshots, performance, doctor](docs/ui-screenshot.png)
 
 ## Install
 
