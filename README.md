@@ -204,6 +204,16 @@ the microVM guest assets (below).
 twin). Sources stay public (BUSL-1.1); releases are prebuilt binaries, the
 client never compiles anything.
 
+**Updating** — `myc update` downloads the latest release for this platform,
+verifies it against the published `.sha256` sidecar and swaps it in
+atomically (on Linux the running binary is replaced in place). `myc doctor`
+prints `update available: X → Y (myc update)` whenever a newer release is
+out — that check is cached for 24 h, is the only automatic one, and sends
+no telemetry. On Windows `myc update` updates the WSL twin (the engine),
+while `myc update --host` stages a verified `myc-new.exe` beside the
+current one (a running .exe cannot replace itself — it prints the exact
+command to finish the swap).
+
 **KVM microVM engine (optional, auto-provisioned).** The guest kernel and
 initramfs (`vmlinux-vmfs`, `init-vm.cpio`) are release assets too. On the
 first `myc run --engine kvm-microvm`, any missing asset is downloaded once
