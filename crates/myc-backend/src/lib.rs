@@ -97,9 +97,10 @@ pub struct EngineInfo {
 /// Every isolation tier this machine could use, strongest first.
 ///
 /// The engine choice is automatic — users never configure it; `myc doctor`
-/// prints this list so the choice is never a mystery. The default backend is
-/// the strongest *complete* tier: the microVM tiers are deliberately not
-/// default until they carry the full `RunRequest` surface.
+/// prints this list so the choice is never a mystery. The automatic choice
+/// ([`decide_auto_engine`]) is the strongest *complete* tier that can carry
+/// the exact request: kvm-microvm when READY, native namespaces otherwise
+/// (see `docs/isolation-engines.md`).
 pub fn detect_engines(_store_root: &std::path::Path) -> Vec<EngineInfo> {
     let mut engines = Vec::new();
     #[cfg(target_os = "linux")]
@@ -140,6 +141,133 @@ pub fn detect_engines(_store_root: &std::path::Path) -> Vec<EngineInfo> {
         });
     }
     engines
+}
+
+// ======================================================================
+// Automatic engine selection (the "auto" policy)
+// ======================================================================
+//
+// `myc run` (no --engine, or --engine auto) never asks the user to pick an
+// isolation tier: it takes the strongest *complete* engine that can carry
+// the exact request — kvm-microvm when READY, native namespaces otherwise.
+// The policy lives in ONE pure function shared by every entry point (CLI,
+// web dashboard), so a container started from the terminal and one started
+// from the browser get the same treatment.
+
+/// What one run request needs from its engine — the inputs of the automatic
+/// choice ([`decide_auto_engine`]). Everything the kvm-microvm tier cannot
+/// carry today is a boolean here; add new incompatibilities as fields, never
+/// as scattered `if`s at call sites.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AutoEngineInputs {
+    /// The request joins a pod-holder's namespaces (`--join-net`): pods are
+    /// namespaces by construction, a VM cannot join them.
+    pub join_net: bool,
+    /// The caller manages the rootfs directory itself (`--run-dir`, the web
+    /// UI's lifecycle contract) — a VM rootfs is not a host directory.
+    pub run_dir: bool,
+    /// The run is interactive (no command override + a terminal on stdin):
+    /// the VM console is output-only, so shells stay native. `myc shell`
+    /// forces native for the same reason.
+    pub interactive: bool,
+    /// The request asked for pasta user-namespace networking (`--net
+    /// isolated`): that isolation IS the namespaces feature; the VM tier
+    /// emulates published ports instead (no userland egress).
+    pub net_isolated: bool,
+    /// The run publishes ports (`-p` or image-exposed ports, with network):
+    /// the VM bridge/tap/DNAT path needs a root myc.
+    pub publishes_ports: bool,
+    /// Is this myc process running as root?
+    pub is_root: bool,
+}
+
+/// The automatic engine decision for one run (see `docs/isolation-engines.md`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EngineDecision {
+    /// kvm-microvm: strongest tier — real VM, own kernel.
+    KvmMicroVm,
+    /// native-namespaces. `why` is the one-line human reason printed on
+    /// stderr ("engine: native-namespaces (auto; …)"); `None` means quiet
+    /// fallback — kvm is simply not complete on this machine and
+    /// `myc doctor` already explains why.
+    NativeNamespaces { why: Option<&'static str> },
+}
+
+/// The automatic engine policy, strongest tier first:
+///
+/// 1. request incompatibilities (pods, caller-managed dirs) → namespaces,
+///    whatever the kvm state — the reason is actionable;
+/// 2. kvm incomplete → namespaces, quietly (doctor explains);
+/// 3. kvm-specific capability guards (interactivity, pasta isolation,
+///    rootless port publishing) → namespaces with the reason;
+/// 4. otherwise kvm-microvm.
+pub fn decide_auto_engine(kvm_complete: bool, inputs: AutoEngineInputs) -> EngineDecision {
+    if inputs.join_net {
+        return EngineDecision::NativeNamespaces {
+            why: Some("--join-net requires namespaces (pods)"),
+        };
+    }
+    if inputs.run_dir {
+        return EngineDecision::NativeNamespaces {
+            why: Some("--run-dir requires namespaces (caller-managed rootfs)"),
+        };
+    }
+    if !kvm_complete {
+        return EngineDecision::NativeNamespaces { why: None };
+    }
+    if inputs.interactive {
+        return EngineDecision::NativeNamespaces {
+            why: Some("interactive runs stay on namespaces (the VM console is output-only)"),
+        };
+    }
+    if inputs.net_isolated {
+        return EngineDecision::NativeNamespaces {
+            why: Some("--net isolated is pasta-backed (namespaces)"),
+        };
+    }
+    if inputs.publishes_ports && !inputs.is_root {
+        return EngineDecision::NativeNamespaces {
+            why: Some("publishing ports on kvm-microvm needs a root myc (bridge, tap, DNAT)"),
+        };
+    }
+    EngineDecision::KvmMicroVm
+}
+
+/// True when the kvm-microvm engine is COMPLETE on this machine — the READY
+/// line of `myc doctor`: /dev/kvm usable + engine binaries + guest assets +
+/// virtiofsd (the full production path, voie B). The probe is pure file
+/// checking (measured < 1 ms, no subprocess); cached per process anyway
+/// because myc-web asks before every container start.
+pub fn kvm_engine_complete() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        static CACHE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *CACHE.get_or_init(|| kvm::KvmMicroVm::from_env().engine_ready())
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        false
+    }
+}
+
+/// Is this process running as root? (the VM network path — bridge, taps,
+/// iptables — needs it, exactly like the Docker daemon).
+pub fn is_root() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        std::fs::read_to_string("/proc/self/status")
+            .ok()
+            .and_then(|s| {
+                s.lines()
+                    .find(|l| l.starts_with("Uid:"))
+                    .and_then(|l| l.split_whitespace().nth(1).map(|u| u == "0"))
+            })
+            == Some(true)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        false
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -264,4 +392,128 @@ pub(crate) fn split_bind(
         cwd.join(host)
     };
     Ok((host_path, container.to_string(), ro))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{decide_auto_engine, AutoEngineInputs, EngineDecision};
+
+    fn inputs() -> AutoEngineInputs {
+        AutoEngineInputs::default()
+    }
+
+    #[test]
+    fn kvm_ready_plus_simple_request_picks_the_microvm() {
+        assert_eq!(
+            decide_auto_engine(true, inputs()),
+            EngineDecision::KvmMicroVm
+        );
+        // Ports to publish are fine when myc runs as root (bridge + DNAT).
+        let with_ports = AutoEngineInputs {
+            publishes_ports: true,
+            is_root: true,
+            ..inputs()
+        };
+        assert_eq!(
+            decide_auto_engine(true, with_ports),
+            EngineDecision::KvmMicroVm
+        );
+    }
+
+    #[test]
+    fn kvm_incomplete_falls_back_to_native_quietly() {
+        // Quiet: `myc doctor` already explains what is missing — the run
+        // output stays identical to the pre-microvm era.
+        assert_eq!(
+            decide_auto_engine(false, inputs()),
+            EngineDecision::NativeNamespaces { why: None }
+        );
+    }
+
+    #[test]
+    fn pods_and_caller_dirs_stay_native_even_when_kvm_is_ready() {
+        let join_net = AutoEngineInputs {
+            join_net: true,
+            ..inputs()
+        };
+        assert_eq!(
+            decide_auto_engine(true, join_net),
+            EngineDecision::NativeNamespaces {
+                why: Some("--join-net requires namespaces (pods)")
+            }
+        );
+        // The incompatibility reason wins over "kvm incomplete" — it is
+        // the actionable one.
+        assert_eq!(
+            decide_auto_engine(false, join_net),
+            EngineDecision::NativeNamespaces {
+                why: Some("--join-net requires namespaces (pods)")
+            }
+        );
+        let run_dir = AutoEngineInputs {
+            run_dir: true,
+            ..inputs()
+        };
+        assert!(matches!(
+            decide_auto_engine(true, run_dir),
+            EngineDecision::NativeNamespaces { why: Some(_) }
+        ));
+    }
+
+    #[test]
+    fn interactive_and_pasta_isolated_runs_stay_native() {
+        let interactive = AutoEngineInputs {
+            interactive: true,
+            ..inputs()
+        };
+        assert!(matches!(
+            decide_auto_engine(true, interactive),
+            EngineDecision::NativeNamespaces { why: Some(w) } if w.contains("interactive")
+        ));
+        let isolated = AutoEngineInputs {
+            net_isolated: true,
+            ..inputs()
+        };
+        assert!(matches!(
+            decide_auto_engine(true, isolated),
+            EngineDecision::NativeNamespaces { why: Some(w) } if w.contains("--net isolated")
+        ));
+        // These guards only matter when kvm would otherwise win: an
+        // incomplete kvm machine stays quiet about them.
+        assert_eq!(
+            decide_auto_engine(false, interactive),
+            EngineDecision::NativeNamespaces { why: None }
+        );
+    }
+
+    #[test]
+    fn rootless_port_publishing_falls_back_to_native() {
+        let rootless = AutoEngineInputs {
+            publishes_ports: true,
+            is_root: false,
+            ..inputs()
+        };
+        assert!(matches!(
+            decide_auto_engine(true, rootless),
+            EngineDecision::NativeNamespaces { why: Some(w) } if w.contains("root")
+        ));
+        // The same request as root takes the microVM (bridge + tap + DNAT).
+        let root = AutoEngineInputs {
+            publishes_ports: true,
+            is_root: true,
+            ..inputs()
+        };
+        assert_eq!(decide_auto_engine(true, root), EngineDecision::KvmMicroVm);
+        // Without ports, rootless runs still take the microVM (no network
+        // needed): `myc run alpine -- echo hi` works unprivileged.
+        let rootless_offline = AutoEngineInputs {
+            publishes_ports: false,
+            is_root: false,
+            ..inputs()
+        };
+        assert_eq!(
+            decide_auto_engine(true, rootless_offline),
+            EngineDecision::KvmMicroVm
+        );
+    }
 }

@@ -6,17 +6,40 @@ and `myc doctor` prints the detected tiers so the choice is never a mystery.
 
 | Tier | Engine (`myc doctor`) | Isolation | Status |
 |---|---|---|---|
-| Linux + KVM | `kvm-microvm` (Cloud Hypervisor driven by `myc-backend`) | **own kernel** — a container escape never shares the host kernel | **READY, opt-in** (`myc run --engine kvm-microvm`): arbitrary environments end to end — voie B virtiofs (production), voie A ext4 fallback; validated `bench/microvm/e2e-vm.sh` 27/27 |
+| Linux + KVM | `kvm-microvm` (Cloud Hypervisor driven by `myc-backend`) | **own kernel** — a container escape never shares the host kernel | **READY — Linux default**: `myc run` picks it automatically whenever it is complete and the request is compatible (see the auto policy below); validated `bench/microvm/e2e-vm.sh` 27/27 |
 | macOS | `hvf-microvm` (Virtualization.framework plan) | own kernel | architecture only (`docs/desktop-architecture.md`) |
 | Windows | `wsl2-twin` (transparent proxy into WSL2) | containers execute inside the Linux twin | shipped |
-| Any Linux | `native-namespaces` (user namespaces, `myc-run`) | **shared kernel** — Docker-level, not better | default everywhere; carries the full feature set (binds, volumes, ports, pods) |
+| Any Linux | `native-namespaces` (user namespaces, `myc-run`) | **shared kernel** — Docker-level, not better | the fallback (and the only tier for pods, interactive runs and pasta isolation); carries the full feature set (binds, volumes, ports, pods) |
 
-Selection policy: the default backend is the strongest **complete** tier —
-today that is `native-namespaces` on Linux and `wsl2-twin` on Windows.
-`kvm-microvm` is now complete too (`READY` in `myc doctor`, full
-`RunRequest` surface), but stays opt-in via `--engine kvm-microvm` until it
-gets more soak time; the automatic choice keeps pointing at namespaces, and
-`myc doctor` explains what each tier does not give you.
+## Automatic selection (the `auto` policy)
+
+The choice is automatic — users never configure it. `myc run` with no
+`--engine` (or `--engine auto`) takes the strongest **complete** engine
+that can carry the exact request; the policy lives in ONE pure function
+(`myc_backend::decide_auto_engine`) shared by the CLI and the web
+dashboard, so a container started from the terminal and one started from
+the browser get the same treatment:
+
+| request | `auto` picks |
+|---|---|
+| simple run, kvm READY on this machine | `kvm-microvm` — stderr: `engine: kvm-microvm (auto; strongest available)` |
+| `--join-net` (stack services in pod mode) | native — pods are namespaces by construction |
+| `--run-dir` (web UI lifecycle contract) | native — the caller owns a host directory |
+| interactive run (no command + a terminal) | native — the VM console is output-only; `myc shell` forces native for the same reason |
+| `--net isolated` (pasta) | native — that isolation IS the namespaces feature |
+| publishes ports (`-p` / image ports) without root | native — the VM bridge/tap/DNAT need a root myc |
+| kvm not complete on this machine | native, quietly — `myc doctor` lists exactly what is missing |
+
+Every non-quiet fallback narrates itself on stderr
+(`engine: native-namespaces (auto; …)`); an explicit
+`--engine kvm-microvm` / `--engine native-namespaces` bypasses the policy
+and never narrates. Stacks (`myc up`, web stacks) run on namespaces on
+purpose: their services reach each other over the host network or the
+pod's private one — a per-service microVM would isolate them from each
+other. Readiness ("complete") counts guest assets present in the
+`~/.mycel/vm-assets/` download cache as ready; a fully missing asset
+still self-downloads on an *explicit* `--engine kvm-microvm` run, but the
+automatic default never depends on the network.
 
 ## Honest limitation of the fallback tier
 
@@ -27,7 +50,8 @@ there. The microVM tiers exist to lift precisely these two limits.
 ## The `kvm-microvm` engine (real execution)
 
 ```bash
-myc run --engine kvm-microvm alpine:3.20 -- echo hello     # sortie hello, code 0
+myc run alpine:3.20 -- echo hello                            # auto — takes the microVM when READY
+myc run --engine kvm-microvm alpine:3.20 -- echo hello       # same, forced (never narrates)
 myc run --engine kvm-microvm -e MSG=ok alpine -- sh -c 'echo $MSG'
 myc run --engine kvm-microvm -v ./data:/data:ro alpine -- cat /data/f.txt
 sudo myc run --engine kvm-microvm -p 6399:6379 redis:7-alpine   # 127.0.0.1:6399 → +PONG
@@ -76,7 +100,11 @@ rules — measured). `127.0.0.1` clients are served by a userland TCP relay
 (`portproxy.rs`, the docker-proxy pattern) because WSL2's kernel never
 applies `nat OUTPUT` DNAT to loopback-sourced SYNs (verified with
 tcpdump). Tap/bridge/iptables need root — exactly like the Docker daemon;
-runs without ports need no privileges at all.
+runs without ports need no privileges at all. A run whose image exposes
+no ports (and no `-p`) boots with NO network device: there is no egress
+NAT yet, so a workload that needs outbound connectivity (`apk add`,
+`curl`) inside the VM must publish a port — or run with
+`--engine native-namespaces`.
 
 Validation (`bench/microvm/e2e-vm.sh`, replayable, delta-based residue
 assertions): **27/27 PASS** — echo/env/bind ro (+ write refused)/exit
@@ -92,9 +120,14 @@ latency-critical paths.
 
 Known limits (v1): `--map-user` ignored (workloads run as guest root);
 x86_64 guests only; one /24 bridge (`MYCEL_VM_CIDR`, 253 concurrent
-networked guests); `--join-net`/`--lazy`/`--run-dir` refused on this
-engine; PID 1 does not reap orphaned grandchildren; a SIGKILLed `myc`
-bypasses cleanup (SIGINT/SIGTERM are handled and tear everything down).
+networked guests); no guest egress NAT — a VM without published ports is
+offline, so `auto` keeps pasta-isolated and rootless-port-publishing runs
+native, and a plain `--net host` run inside the VM has no outbound
+network (use `--engine native-namespaces` when the workload needs it);
+`--join-net`/`--lazy`/`--run-dir` refused on this engine (the auto policy
+falls back to namespaces for them, with the reason on stderr); PID 1 does
+not reap orphaned grandchildren; a SIGKILLed `myc` bypasses cleanup
+(SIGINT/SIGTERM are handled and tear everything down).
 
 ## microVM boot benchmark (`bench/microvm`)
 
@@ -161,9 +194,11 @@ machine). Raw measurement files live in each bench `results/` directory
 ## Roadmap
 
 1. ~~Guest integration for arbitrary environments~~ **done** (voie B
-   virtiofs + voie A ext4, e2e 27/27): remaining before `kvm-microvm`
-   becomes the Linux default — soak time, PID-1 reaping, map_user, and
-   reproducing the e2e suite on native KVM.
+   virtiofs + voie A ext4, e2e 27/27). ~~`kvm-microvm` becomes the Linux
+   default~~ **done** — the `auto` policy picks it whenever READY and the
+   request is compatible (§ Automatic selection). Remaining hardening:
+   PID-1 reaping, `--map-user`, guest egress NAT (a VM without published
+   ports is offline), and reproducing the e2e suite on native KVM.
 2. macOS tier via libkrun (KVM + Hypervisor.framework in one code path —
    the reason libkrun is the preferred vehicle long-term).
 3. Snapshot/restore on the microVM tier: Firecracker path validated under

@@ -59,10 +59,10 @@ use sha2::{Digest, Sha256};
 
 use crate::kvm::{
     allocate_lease, detach_tap, dnat_rules, ensure_bridge, guest_env, iptables_bin, iptables_run,
-    is_root, pid_alive, purge_tag_rules, release_lease, run_env_content, seed_guest_arp,
+    pid_alive, purge_tag_rules, release_lease, run_env_content, seed_guest_arp,
     spawn_console_tailer, tree_size, vm_assets_cache, vm_net, GuestSpec, Lease, VmNet, BRIDGE_NAME,
 };
-use crate::{BackendError, Result, RunRequest};
+use crate::{is_root, BackendError, Result, RunRequest};
 
 /// Firecracker release the accelerator is built against (matches
 /// `bench/snapshot-wsl2`, which proved restore liveliness under WSL2-KVM).

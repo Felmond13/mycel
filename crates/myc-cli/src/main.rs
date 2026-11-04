@@ -107,9 +107,10 @@ enum Command {
         /// of root (e.g. `--map-user 999` to run as the postgres user)
         #[arg(long)]
         map_user: Option<String>,
-        /// Execution engine: `auto` (default — native namespaces), or
-        /// `kvm-microvm` (real VM, own kernel — strongest isolation; see
-        /// `myc doctor` for its readiness)
+        /// Execution engine: `auto` (default — the strongest complete
+        /// engine this run can carry: kvm-microvm on Linux when READY,
+        /// native namespaces otherwise, see `myc doctor`), or force one
+        /// explicitly
         #[arg(long)]
         engine: Option<String>,
         /// Disable the Firecracker snapshot cache of the kvm-microvm

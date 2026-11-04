@@ -884,23 +884,27 @@ struct StartContainerBody {
     /// app declares but that are missing here keep their own number.
     #[serde(default)]
     ports: Vec<containers::PortMapping>,
-    /// Execution engine: `native-namespaces` (the default) or
-    /// `kvm-microvm` (real VM with its own kernel — see /api/engines for
-    /// what this machine can do).
+    /// Execution engine: `auto` (default — the same automatic policy as
+    /// `myc run`: the strongest complete engine this container can carry),
+    /// or an explicit `native-namespaces` / `kvm-microvm` (see
+    /// /api/engines for what this machine can do).
     #[serde(default)]
     engine: Option<String>,
 }
 
 /// Normalize and validate the requested execution engine: absent, empty
-/// and `auto` all mean the native default; anything but the two known
+/// and `auto` all mean the automatic choice, resolved at start time with
+/// the exact policy `myc run` applies (kvm-microvm when READY and
+/// compatible, native namespaces otherwise); anything but the known
 /// labels is a 400.
 fn normalize_engine(raw: Option<&str>) -> Result<String, ApiError> {
     let raw = raw.unwrap_or_default().trim();
     match raw {
-        "" | "auto" | "native-namespaces" => Ok("native-namespaces".to_string()),
+        "" | "auto" => Ok("auto".to_string()),
+        "native-namespaces" => Ok("native-namespaces".to_string()),
         "kvm-microvm" => Ok("kvm-microvm".to_string()),
         other => Err(bad_request(format!(
-            "unknown engine '{other}' (expected native-namespaces or kvm-microvm)"
+            "unknown engine '{other}' (expected auto, native-namespaces or kvm-microvm)"
         ))),
     }
 }
@@ -1478,7 +1482,11 @@ async fn stack_up(State(app): State<App>, UrlPath(name): UrlPath<String>) -> Api
                 stack: Some(name.clone()),
                 service: Some(svc_name.clone()),
                 pod,
-                engine: String::new(),
+                // Stack services reach each other over the host network or
+                // the pod's private one — namespaces by construction (a
+                // per-service microVM would isolate them from each other;
+                // single containers get the automatic engine choice).
+                engine: "native-namespaces".to_string(),
             };
             app.manager.start(spec).map_err(internal)?;
             started.push(svc_name.clone());
@@ -1582,7 +1590,9 @@ async fn stack_restart_service(
             stack: Some(name.clone()),
             service: Some(svc.clone()),
             pod,
-            engine: String::new(),
+            // Same engine rule as stack_up: services share the stack's
+            // networking, so they run on namespaces.
+            engine: "native-namespaces".to_string(),
         };
         let id = app.manager.start(spec).map_err(internal)?;
         let container = app
@@ -1786,10 +1796,10 @@ mod tests {
     }
 
     #[test]
-    fn engine_selection_defaults_to_native_and_rejects_unknowns() {
-        assert_eq!(normalize_engine(None).unwrap(), "native-namespaces");
-        assert_eq!(normalize_engine(Some("")).unwrap(), "native-namespaces");
-        assert_eq!(normalize_engine(Some("auto")).unwrap(), "native-namespaces");
+    fn engine_selection_defaults_to_auto_and_rejects_unknowns() {
+        assert_eq!(normalize_engine(None).unwrap(), "auto");
+        assert_eq!(normalize_engine(Some("")).unwrap(), "auto");
+        assert_eq!(normalize_engine(Some("auto")).unwrap(), "auto");
         assert_eq!(
             normalize_engine(Some("native-namespaces")).unwrap(),
             "native-namespaces"

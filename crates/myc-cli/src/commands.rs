@@ -5,7 +5,7 @@ use anyhow::{bail, Context, Result};
 use myc_manifest::Manifest;
 use myc_oci::{IngestProgress, Platform};
 use myc_store::Store;
-use std::io::Write;
+use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 
 fn open_store(root: &Path) -> Result<Store> {
@@ -257,8 +257,12 @@ pub struct RunArgs {
     /// non-root uid and skip their chown/su-exec paths, which cannot work
     /// in a single-uid user namespace.
     pub map_user: Option<String>,
-    /// Execution engine: `None`/`auto` = native namespaces (default),
-    /// `kvm-microvm` = real VM with its own kernel (see docs/isolation-engines.md).
+    /// Execution engine: `None`/`auto` (the default) = the strongest
+    /// *complete* engine that can carry this request — kvm-microvm on
+    /// Linux when READY, native namespaces otherwise, with a clean
+    /// fallback for what the microVM cannot carry (pods, --run-dir,
+    /// interactive runs, pasta isolation, rootless port publishing — see
+    /// docs/isolation-engines.md). Explicit labels force one engine.
     pub engine: Option<String>,
     /// Disable the Firecracker snapshot cache (`--no-snapshot-cache`):
     /// kvm-microvm runs always cold-boot through Cloud Hypervisor.
@@ -372,10 +376,35 @@ pub fn resolve_mounts(
 }
 
 pub fn run(root: &Path, reference: &str, args: RunArgs) -> Result<i32> {
-    // Engine selection: the default stays native namespaces (the strongest
-    // *default-safe* tier); kvm-microvm is opt-in per run until it becomes
-    // the Linux default (docs/isolation-engines.md).
+    // Engine selection (docs/isolation-engines.md): `auto` — the default —
+    // picks the strongest *complete* engine that can carry this exact
+    // request. On Linux that is kvm-microvm whenever it is READY (own
+    // kernel, strongest isolation); native namespaces take over for pods
+    // (--join-net), caller-managed run dirs, interactive runs, pasta
+    // isolation, rootless port publishing, and on every machine where the
+    // microVM is not complete yet (`myc doctor` says which and why).
+    // Explicit --engine labels bypass the choice; only `auto` narrates.
     match args.engine.as_deref() {
+        #[cfg(target_os = "linux")]
+        Some("native-namespaces") => {}
+        #[cfg(target_os = "linux")]
+        None | Some("auto") => match auto_engine_decision(root, reference, &args) {
+            Ok(myc_backend::EngineDecision::KvmMicroVm) => {
+                eprintln!("engine: kvm-microvm (auto; strongest available)");
+                return run_kvm_engine(root, reference, args);
+            }
+            Ok(myc_backend::EngineDecision::NativeNamespaces { why: Some(why) }) => {
+                eprintln!("engine: native-namespaces (auto; {why})");
+            }
+            // Quiet fallback: kvm is not complete here — `myc doctor`
+            // explains what is missing; the run behaves exactly like the
+            // pre-microvm era.
+            Ok(myc_backend::EngineDecision::NativeNamespaces { why: None }) => {}
+            // Resolution failed: fall through — the native path reports
+            // the exact same error for an unknown reference.
+            Err(_) => {}
+        },
+        #[cfg(not(target_os = "linux"))]
         None | Some("auto") | Some("native-namespaces") => {}
         #[cfg(target_os = "linux")]
         Some("kvm-microvm") => return run_kvm_engine(root, reference, args),
@@ -439,6 +468,38 @@ pub fn run(root: &Path, reference: &str, args: RunArgs) -> Result<i32> {
         eprintln!("rootfs kept at {}", kept.display());
     }
     Ok(code)
+}
+
+/// The automatic engine decision for one `myc run` on Linux: applies the
+/// shared policy (`myc_backend::decide_auto_engine` — the very same
+/// function the web dashboard uses) to this request. The reference must be
+/// resolved first to know the image's exposed ports (publishing them on
+/// the microVM needs a root myc); an unknown reference errors here and the
+/// native path then reports it exactly like before.
+#[cfg(target_os = "linux")]
+fn auto_engine_decision(
+    root: &Path,
+    reference: &str,
+    args: &RunArgs,
+) -> Result<myc_backend::EngineDecision> {
+    let store = open_store(root)?;
+    let (_, manifest) = resolve_or_ingest(&store, root, reference)?;
+    let inputs = myc_backend::AutoEngineInputs {
+        join_net: args.join_net.is_some(),
+        run_dir: args.run_dir.is_some(),
+        // No command override + a terminal on stdin: the user is about to
+        // interact (`myc run alpine` for the image shell) — the VM console
+        // is output-only. `myc shell` forces native for the same reason.
+        interactive: args.command.is_empty() && std::io::stdin().is_terminal(),
+        net_isolated: args.net == "isolated",
+        publishes_ports: !args.publish.is_empty()
+            || (args.net != "none" && !manifest.config.exposed_ports.is_empty()),
+        is_root: myc_backend::is_root(),
+    };
+    Ok(myc_backend::decide_auto_engine(
+        myc_backend::kvm_engine_complete(),
+        inputs,
+    ))
 }
 
 /// `myc run --engine kvm-microvm`: same CLI surface, executed inside a real
@@ -802,7 +863,12 @@ pub fn up(root: &Path, file: &Path, net: Option<&str>) -> Result<i32> {
         let image = svc.image.clone();
         let service_name = name.clone();
         let args = RunArgs {
-            engine: None,
+            // Stack services share the host network (or the pod's private
+            // one) and reach each other over it — a per-service microVM
+            // would isolate them from each other, so stacks stay on
+            // namespaces by construction (single containers get the auto
+            // engine choice; pods are namespaces-only anyway).
+            engine: Some("native-namespaces".to_string()),
             command: svc.command.clone(),
             env: svc.env.clone(),
             binds: svc
@@ -1095,6 +1161,9 @@ pub fn shell(root: &Path, image: &str) -> Result<i32> {
         image,
         RunArgs {
             command: vec!["/bin/sh".to_string()],
+            // Interactive by definition: the kvm-microvm console is
+            // output-only, so shells always run on namespaces.
+            engine: Some("native-namespaces".to_string()),
             ..RunArgs::default()
         },
     )
@@ -1138,6 +1207,18 @@ pub fn doctor(root: &Path) -> Result<i32> {
             engine.kind.degraded_features().join("; ")
         );
     }
+    // The concrete engine `myc run` takes by default here — the same
+    // policy the run itself applies (strongest *complete* engine; pods,
+    // --run-dir, interactive runs, pasta isolation and rootless port
+    // publishing fall back to namespaces with a one-line explanation).
+    let auto = if myc_backend::kvm_engine_complete() {
+        "kvm-microvm"
+    } else {
+        "native-namespaces"
+    };
+    println!(
+        "  default for `myc run`: {auto} (auto — strongest complete engine; docs/isolation-engines.md)"
+    );
     println!();
     if failures == 0 {
         println!(

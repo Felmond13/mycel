@@ -17,8 +17,11 @@ use serde_json::{json, Value};
 /// backend — the full check-by-check probe report.
 pub fn engines_payload(store_root: &std::path::Path) -> Value {
     let detected = myc_backend::detect_engines(store_root);
-    // The default is the strongest *complete* engine — exactly what
-    // `myc doctor` would pick. Never absent: fall back to native.
+    // The default is the strongest *complete* engine — what `myc run`
+    // (auto) and `myc doctor` pick for a simple request; per-request
+    // fallbacks (pods, --run-dir, rootless port publishing…) are resolved
+    // at start time by the same policy (myc_backend::decide_auto_engine).
+    // Never absent: fall back to native.
     let default = detected
         .iter()
         .find(|e| e.available && e.complete)
