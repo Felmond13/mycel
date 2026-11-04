@@ -10,6 +10,8 @@
 //!   pins/<manifest id>           GC roots
 //!   packs/pack-<hash>.zst        v2 chunk packs (opt-in, see `chunks`)
 //!   chunks/<blob-hash>.chunks    v2 chunk sidecars (opt-in)
+//!   chunk-mode                   v2 disk mode: transfer | lean | packs-only
+//!   blob-cache/<hash>            packs-only: markers of reassembled blobs
 //!   lock                         inter-process lock file
 //! ```
 //!
@@ -18,15 +20,21 @@
 //! materialization hardlinks out of this store.
 //!
 //! The v2 chunk layer (`chunks` module, enabled by `MYCEL_CHUNKED=1`) is
-//! purely additive: blob files, manifests and their ids are untouched, and
-//! chunk packs exist only to deduplicate future *transfers*. See
-//! `docs/design/store-v2.md` for the full design.
+//! purely additive: blob files, manifests and their ids are untouched.
+//! Its disk cost is arbitrated per store by `MYCEL_CHUNK_MODE`
+//! ([`ChunkMode`]): `transfer` keeps v1 blobs *and* packs (chunked
+//! transfers, hardlinks, +~50 % disk), `lean` records chunk ids without
+//! packs (negotiation-ready, ~0 % overhead) and `packs-only` stores
+//! chunked files as packs only, reassembling the v1 blob on demand into a
+//! LRU-bounded cache (`blob_cache` module, `MYCEL_BLOB_CACHE_MB`). See
+//! `docs/design/store-v2.md` for the full design and measurements.
 
 pub mod archive;
+pub mod blob_cache;
 pub mod chunks;
 pub mod volumes;
 
-pub use chunks::{ChunkId, ChunkStats};
+pub use chunks::{ChunkId, ChunkMode, ChunkStats};
 
 use fs2::FileExt;
 use myc_manifest::Manifest;
@@ -84,6 +92,8 @@ pub struct Store {
     root: PathBuf,
     _lock: fs::File,
     chunked: bool,
+    /// None iff chunking is off; the store's settled disk mode otherwise.
+    chunk_mode: Option<ChunkMode>,
 }
 
 pub struct BlobStats {
@@ -94,29 +104,63 @@ pub struct BlobStats {
 impl Store {
     /// Open (creating if needed) the store at `root` and take a shared
     /// inter-process lock. GC upgrades to an exclusive lock. The v2 chunk
-    /// layer is active iff `MYCEL_CHUNKED=1`.
+    /// layer is active iff `MYCEL_CHUNKED=1`, with the disk mode from
+    /// `MYCEL_CHUNK_MODE` (default `transfer`).
+    ///
+    /// The mode is recorded in `chunk-mode` at first v2 use and is then
+    /// part of the store's identity. Opening with a *different* mode is
+    /// refused while any blob exists only as packs (packs-only data whose
+    /// v1 file was never reassembled) — switching would make that data
+    /// invisible. Materialize those environments once (any `myc run`
+    /// repopulates the blob cache) or re-ingest them, then switch.
     pub fn open(root: impl Into<PathBuf>) -> Result<Self> {
-        Self::open_inner(root, Self::chunking_enabled_from_env())
+        let chunked = Self::chunking_enabled_from_env();
+        let mode = if chunked {
+            Some(ChunkMode::from_env()?)
+        } else {
+            None
+        };
+        Self::open_inner(root, chunked, mode)
     }
 
     /// Like [`Store::open`] but with the v2 chunk layer forced on,
-    /// regardless of the environment. Behavior is otherwise identical.
+    /// regardless of the environment. Behavior is otherwise identical
+    /// (the disk mode still comes from `MYCEL_CHUNK_MODE`).
     pub fn open_chunked(root: impl Into<PathBuf>) -> Result<Self> {
-        Self::open_inner(root, true)
+        Self::open_inner(root, true, Some(ChunkMode::from_env()?))
     }
 
-    fn open_inner(root: impl Into<PathBuf>, chunked: bool) -> Result<Self> {
+    /// Like [`Store::open_chunked`] with an explicit disk mode — the
+    /// hermetic variant used by tests and tools that already know the
+    /// mode they want.
+    pub fn open_chunked_with_mode(root: impl Into<PathBuf>, mode: ChunkMode) -> Result<Self> {
+        Self::open_inner(root, true, Some(mode))
+    }
+
+    fn open_inner(
+        root: impl Into<PathBuf>,
+        chunked: bool,
+        mode: Option<ChunkMode>,
+    ) -> Result<Self> {
         let root = root.into();
         for sub in ["objects", "manifests", "refs", "pins", "tmp"] {
             let p = root.join(sub);
             fs::create_dir_all(&p).map_err(|e| io_err(&p, e))?;
         }
         if chunked {
-            for sub in ["packs", "chunks"] {
-                let p = root.join(sub);
+            debug_assert!(mode.is_some());
+            // Lean never writes packs; the other modes do.
+            if mode != Some(ChunkMode::Lean) {
+                let p = root.join("packs");
                 fs::create_dir_all(&p).map_err(|e| io_err(&p, e))?;
             }
+            let p = root.join("chunks");
+            fs::create_dir_all(&p).map_err(|e| io_err(&p, e))?;
         }
+        let mode = match mode {
+            Some(m) if chunked => Some(Self::settle_chunk_mode(&root, m)?),
+            _ => None,
+        };
         let lock_path = root.join("lock");
         let lock = fs::OpenOptions::new()
             .create(true)
@@ -129,7 +173,65 @@ impl Store {
             root,
             _lock: lock,
             chunked,
+            chunk_mode: mode,
         })
+    }
+
+    /// Make the requested mode coherent with what the store already
+    /// holds: first v2 use records it; a later *change* is accepted only
+    /// when no blob exists solely as packs.
+    fn settle_chunk_mode(root: &Path, requested: ChunkMode) -> Result<ChunkMode> {
+        match chunks::read_chunk_mode(root)? {
+            None => {
+                chunks::write_chunk_mode(root, requested)?;
+                Ok(requested)
+            }
+            Some(current) if current == requested => Ok(current),
+            Some(current) => {
+                let orphans = Self::blobs_only_in_packs(root)?;
+                if !orphans.is_empty() {
+                    return Err(StoreError::Chunk(format!(
+                        "cannot switch chunk mode from '{}' to '{}': {} blob(s) exist only \
+                         as packs, without a v1 blob file (first: {}). They would become \
+                         unreadable. Re-materialize them first — run each environment once \
+                         (any myc run reassembles and caches its blobs) — or re-ingest, \
+                         then switch modes.",
+                        current.as_str(),
+                        requested.as_str(),
+                        orphans.len(),
+                        orphans[0]
+                    )));
+                }
+                chunks::overwrite_chunk_mode(root, requested)?;
+                Ok(requested)
+            }
+        }
+    }
+
+    /// Blobs that have a chunk sidecar but no v1 blob file — data whose
+    /// only backing store is the packs (normal in packs-only until first
+    /// use; a hazard for any other mode).
+    fn blobs_only_in_packs(root: &Path) -> Result<Vec<String>> {
+        let dir = root.join("chunks");
+        let entries = match fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => return Err(io_err(&dir, e)),
+        };
+        let mut orphans = Vec::new();
+        for entry in entries {
+            let entry = entry.map_err(|e| io_err(&dir, e))?;
+            let name = entry.file_name().to_string_lossy().to_string();
+            let Some(hash) = name.strip_suffix(".chunks") else {
+                continue;
+            };
+            let shard = &hash[..2.min(hash.len())];
+            if !root.join("objects").join(shard).join(hash).exists() {
+                orphans.push(hash.to_string());
+            }
+        }
+        orphans.sort();
+        Ok(orphans)
     }
 
     /// `MYCEL_CHUNKED=1` opts this store into the v2 chunk layer.
@@ -195,6 +297,18 @@ impl Store {
             self.index_chunks_if_enabled(&hash, size, tmp.path())?;
             return Ok((hash, size)); // dedup hit; drop the temp file
         }
+        // packs-only: a chunked blob lives only as packs + sidecar. Index
+        // from the temp file; if that produced a sidecar, the v1 blob is
+        // deliberately not persisted (rebuilt on demand by `blob`).
+        // Without a sidecar (chunking off, size out of range, empty cut)
+        // we fall through and store the plain v1 blob — data is never at
+        // risk.
+        if self.skip_blob_write(size) {
+            self.index_chunks_if_enabled(&hash, size, tmp.path())?;
+            if chunks::sidecar_exists(&self.root, &hash) {
+                return Ok((hash, size)); // packs-only: blob file omitted
+            }
+        }
         let parent = dest.parent().unwrap();
         fs::create_dir_all(parent).map_err(|e| io_err(parent, e))?;
         tmp.flush().map_err(|e| io_err(tmp.path(), e))?;
@@ -215,35 +329,123 @@ impl Store {
         Ok((hash, size))
     }
 
+    /// packs-only + chunkable size ⇒ the v1 blob is not the backing store.
+    fn skip_blob_write(&self, size: u64) -> bool {
+        self.chunk_mode == Some(ChunkMode::PacksOnly) && self.chunkable(size)
+    }
+
+    fn chunkable(&self, size: u64) -> bool {
+        (chunks::CHUNK_MIN_BLOB_SIZE..=chunks::CHUNK_MAX_BLOB_SIZE).contains(&size)
+    }
+
     /// v2 chunk indexing (opt-in): cut blobs in
     /// `[chunks::CHUNK_MIN_BLOB_SIZE, chunks::CHUNK_MAX_BLOB_SIZE]` into
-    /// content-defined chunks, store only the missing ones in a pack and
-    /// write the blob's sidecar. Purely additive — the v1 blob file is
-    /// already on disk when this runs, so readers and hardlinking never
-    /// depend on the chunk layer.
+    /// content-defined chunks and record what the mode requires —
+    /// missing chunks into a pack + sidecar (transfer, packs-only), or a
+    /// lean sidecar with no pack (lean). Idempotent: an existing sidecar
+    /// (either format) short-circuits.
     fn index_chunks_if_enabled(&self, blob_hash: &str, size: u64, data_file: &Path) -> Result<()> {
-        let chunkable = (chunks::CHUNK_MIN_BLOB_SIZE..=chunks::CHUNK_MAX_BLOB_SIZE).contains(&size);
-        if !self.chunked || !chunkable {
+        if !self.chunked || !self.chunkable(size) {
             return Ok(());
         }
-        if chunks::blob_chunks(&self.root, blob_hash)?.is_some() {
+        if chunks::sidecar_exists(&self.root, blob_hash) {
             return Ok(()); // already indexed — re-ingest is a no-op
         }
         let data = fs::read(data_file).map_err(|e| io_err(data_file, e))?;
-        chunks::index_blob(&self.root, blob_hash, &data).map(|_| ())
+        match self.chunk_mode {
+            Some(ChunkMode::Lean) => chunks::lean_index_blob(&self.root, blob_hash, &data),
+            _ => chunks::index_blob(&self.root, blob_hash, &data),
+        }
+        .map(|_| ())
     }
 
+    /// Is the blob present? In packs-only mode (and generally, once a
+    /// sidecar exists) a blob backed by packs counts as present even when
+    /// its v1 file is not on disk: [`Store::blob`] will rebuild it.
     pub fn has_blob(&self, hash: &str) -> bool {
-        self.blob_path(hash).exists()
+        self.blob_path(hash).exists() || (self.chunked && chunks::sidecar_exists(&self.root, hash))
     }
 
-    /// Absolute path of a blob, verifying existence.
+    /// Absolute path of a blob, verifying existence. If the v1 file is
+    /// missing but the packs hold it (packs-only mode, or a v1 file lost
+    /// after a transfer-mode ingest), it is reassembled — BLAKE3-verified —
+    /// written into `objects/` like any v1 blob and recorded in the
+    /// size-bounded blob cache (see [`crate::blob_cache`]).
     pub fn blob(&self, hash: &str) -> Result<PathBuf> {
         let p = self.blob_path(hash);
-        if !p.exists() {
-            return Err(StoreError::BlobMissing(hash.to_string()));
+        if p.exists() {
+            if self.chunk_mode == Some(ChunkMode::PacksOnly) {
+                blob_cache::touch(&self.root, hash); // LRU clock
+            }
+            return Ok(p);
         }
-        Ok(p)
+        if self.chunked && chunks::sidecar_exists(&self.root, hash) {
+            return self.reassemble_into_cache(hash);
+        }
+        Err(StoreError::BlobMissing(hash.to_string()))
+    }
+
+    /// Rebuild a packs-backed blob into `objects/` and cache it. Deleting
+    /// the cached file later never touches its chunks or packs.
+    fn reassemble_into_cache(&self, hash: &str) -> Result<PathBuf> {
+        let data = chunks::reassemble(&self.root, hash)?; // verifies BLAKE3
+        let dest = self.blob_path(hash);
+        let parent = dest.parent().unwrap();
+        fs::create_dir_all(parent).map_err(|e| io_err(parent, e))?;
+        let tmp_dir = self.root.join("tmp");
+        let mut tmp = tempfile::NamedTempFile::new_in(&tmp_dir).map_err(|e| io_err(&tmp_dir, e))?;
+        tmp.write_all(&data).map_err(|e| io_err(tmp.path(), e))?;
+        tmp.flush().map_err(|e| io_err(tmp.path(), e))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let perm = fs::Permissions::from_mode(readonly_mode(0o444));
+            fs::set_permissions(tmp.path(), perm).map_err(|e| io_err(tmp.path(), e))?;
+        }
+        match tmp.persist_noclobber(&dest) {
+            Ok(_) => {}
+            Err(e) if e.error.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(io_err(&dest, e.error)),
+        }
+        blob_cache::record(&self.root, hash, data.len() as u64)?;
+        // Best-effort: eviction must never fail the materialization.
+        let _ = self.evict_blob_cache();
+        Ok(dest)
+    }
+
+    /// Evict LRU-first from the blob cache until it fits
+    /// `$MYCEL_BLOB_CACHE_MB` (default 512 MiB). Only blobs no stored
+    /// manifest references are evictable; their packs stay untouched.
+    /// Returns (evicted blobs, bytes freed).
+    pub fn evict_blob_cache(&self) -> Result<(u64, u64)> {
+        let budget = blob_cache::budget_from_env();
+        self.evict_blob_cache_with_budget(budget)
+    }
+
+    /// [`Store::evict_blob_cache`] with an explicit byte budget.
+    pub fn evict_blob_cache_with_budget(&self, budget_bytes: u64) -> Result<(u64, u64)> {
+        if !self.chunked {
+            return Ok((0, 0));
+        }
+        let protected = self.live_blob_hashes()?;
+        blob_cache::evict(&self.root, budget_bytes, &protected)
+    }
+
+    /// Blob hashes referenced by every stored manifest (the GC live set).
+    fn live_blob_hashes(&self) -> Result<HashSet<String>> {
+        let mut live = HashSet::new();
+        for (_, manifest) in self.list_manifests()? {
+            for (hash, _) in manifest.referenced_blobs() {
+                live.insert(hash.to_string());
+            }
+        }
+        Ok(live)
+    }
+
+    /// (count, bytes) of v1 blobs currently cached after on-demand
+    /// reassembly (packs-only mode reporting).
+    pub fn blob_cache_stats(&self) -> Result<(u64, u64)> {
+        blob_cache::stats(&self.root)
     }
 
     /// Re-hash a blob and verify integrity.
@@ -269,10 +471,16 @@ impl Store {
         self.chunked
     }
 
-    /// Does the store hold this chunk (in any pack)? Bloom filters answer
-    /// first, pack indexes confirm — so the answer has no false positives.
-    /// Unavailable (scan failure) reports `false`: the safe direction for a
-    /// transfer is to resend.
+    /// The store's disk mode (`None` when chunking is off): how the v2
+    /// layer trades disk for transfer-readiness. See [`ChunkMode`].
+    pub fn chunk_mode(&self) -> Option<ChunkMode> {
+        self.chunk_mode
+    }
+
+    /// Does the store hold this chunk? A sidecar lists it iff the store
+    /// has (or can produce) those bytes, in every disk mode — see
+    /// `chunks::known_chunk_ids`. Unavailable (scan failure) reports
+    /// `false`: the safe direction for a transfer is to resend.
     pub fn has_chunk(&self, id: &ChunkId) -> bool {
         chunks::has_chunk(&self.root, id)
     }
@@ -523,12 +731,7 @@ impl Store {
             }
         }
 
-        let mut live: HashSet<String> = HashSet::new();
-        for (_, manifest) in self.list_manifests()? {
-            for (hash, _) in manifest.referenced_blobs() {
-                live.insert(hash.to_string());
-            }
-        }
+        let live = self.live_blob_hashes()?;
         let mut deleted = 0u64;
         let mut freed = 0u64;
         let objects = self.root.join("objects");
@@ -556,10 +759,15 @@ impl Store {
             }
         }
         // v2 chunk layer: sidecars of dead blobs go first, then every pack
-        // no surviving sidecar references.
+        // no surviving sidecar references. In packs-only mode this never
+        // touches the packs of live sidecars — a blob evicted from the v1
+        // cache keeps its chunks and can be reassembled again.
         let (extra_deleted, extra_freed) = chunks::gc_sweep(&self.root, &live)?;
         deleted += extra_deleted;
         freed += extra_freed;
+        // Blob-cache markers whose blob is gone (v1 pass above or an
+        // earlier eviction) are stale: drop them.
+        let _ = blob_cache::sweep_orphans(&self.root);
         self._lock.unlock().map_err(|e| io_err(&lock_path, e))?;
         self._lock
             .lock_shared()
@@ -721,12 +929,18 @@ mod tests {
     #[test]
     fn chunked_flag_follows_constructor() {
         let dir = tempfile::tempdir().unwrap();
-        let plain = Store::open_inner(dir.path().join("a"), false).unwrap();
+        let plain = Store::open_inner(dir.path().join("a"), false, None).unwrap();
         assert!(!plain.chunked());
         assert!(!plain.root().join("packs").exists());
-        let chunked = Store::open_chunked(dir.path().join("b")).unwrap();
+        let chunked =
+            Store::open_chunked_with_mode(dir.path().join("b"), ChunkMode::Transfer).unwrap();
         assert!(chunked.chunked());
+        assert_eq!(chunked.chunk_mode(), Some(ChunkMode::Transfer));
         assert!(chunked.root().join("packs").is_dir());
+        assert_eq!(
+            std::fs::read_to_string(chunked.root().join("chunk-mode")).unwrap(),
+            "transfer"
+        );
     }
 
     #[test]
@@ -736,12 +950,12 @@ mod tests {
         // path for existing stores).
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("s");
-        let v1 = Store::open_inner(&root, false).unwrap();
+        let v1 = Store::open_inner(&root, false, None).unwrap();
         let data = vec![5u8; 128 * 1024];
         let (hash, _) = v1.put_blob(&mut &data[..]).unwrap();
         assert!(v1.blob_chunks(&hash).unwrap().is_none());
         drop(v1);
-        let v2 = Store::open_chunked(&root).unwrap();
+        let v2 = Store::open_chunked_with_mode(&root, ChunkMode::Transfer).unwrap();
         let (h2, _) = v2.put_blob(&mut &data[..]).unwrap();
         assert_eq!(hash, h2);
         assert!(v2.blob_chunks(&hash).unwrap().is_some());

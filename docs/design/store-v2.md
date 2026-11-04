@@ -364,3 +364,157 @@ celui mesuré au niveau store : ~6,7 Mio transférés au lieu de 7,7 Mio
   dashboard ; seuls les nouveaux champs des rapports (`chunked`, compteur
   de chunks) ne sont pas encore affichés par `myc-cli` (champ libre pour
   une future ligne « pushed … (N chunks) »).
+
+---
+
+## 9. Modes disque (`MYCEL_CHUNK_MODE`) : arbitrage du surcoût mesuré
+
+> Implémenté dans `crates/myc-store` (`ChunkMode`, sidecars lean, cache de
+> blobs `blob_cache`). Mesuré le 2026-11-04 (binaire release, WSL2) sur
+> alpine 3.20 + alpine 3.21 + nginx 1.27-alpine — store vierge par mode ;
+> script `/home/nboukadoum-ext/build/store-modes.sh`, résultats bruts dans
+> `/home/nboukadoum-ext/build/store-modes-results.txt`.
+
+### 9.1 Le problème
+
+Le v2 « historique » écrit le blob v1 **et** les packs : +48,7 % de disque
+(§4). Or les packs n'ont d'utilité *réseau* (§8) que comme cache de
+transfert ; *savoir ce qu'on a*, la négociation s'en contente des
+sidecars. D'où trois modes, choisis par `MYCEL_CHUNK_MODE` (défaut
+`transfer` = comportement §4 inchangé) et tranchés par la mesure (§9.4),
+pas par opinion.
+
+| | **transfer** (défaut) | **lean** | **packs-only** |
+|---|---|---|---|
+| Écrit à l'ingest (≥ 64 Kio) | blob v1 + pack + sidecar plein | blob v1 + sidecar **lean** (ids seuls, 32 o/chunk, aucun pack) | pack + sidecar plein, **pas de blob v1** |
+| Fichiers < 64 Kio | blob v1 | blob v1 | blob v1 (rien d'autre ne les porte) |
+| Disque (mesuré §9.4) | +47,8 % | **+0,70 %** | **−46,6 %** |
+| Pull chunké (§8) | prêt | prêt (négociation par sidecars) | prêt |
+| Push chunké **source** (§8) | prêt (packs) | non (pas de pack où lire le chunk → repli blob v1) | prêt (packs) |
+| Hardlink `myc-run` | direct | direct | via réassemblage à la 1re utilisation |
+| Coût du 1er run | — | — | +67 ms mesuré (alpine) |
+
+### 9.2 Mécanique commune
+
+- **`store/chunk-mode`** : écrit au premier usage v2 (premier gagnant,
+  comme tous les fichiers du store). Un changement de mode est **refusé**
+  tant qu'un blob n'existe *qu'en packs* (sans fichier v1) — ces octets
+  deviendraient invisibles ; le message explique comment régénérer (un
+  `myc run` de chaque environnement réassemble et met en cache, ou
+  re-ingest). Une fois tous les blobs matérialisés, le switch est accepté
+  (packs-only → lean, lean → transfer, etc.).
+- **Oracle de connaissance unifié** : `has_chunk` / `missing_chunks`
+  scannent les **sidecars** (les deux formats), quel que soit le mode.
+  Complet même pour les packs, par invariant : un pack n'est jamais écrit
+  sans le sidecar qui le référence, et le GC ne garde un pack que
+  référencé par un sidecar survivant. Les Blooms restent sur disque (et
+  dans `reassemble`) pour le protocole hub et la localisation par pack.
+- **Sidecar lean** (`MYCCHNKL1`) : liste d'ids, sans table de packs. En
+  lean, si *tous* les chunks d'un nouveau blob sont déjà connus (un autre
+  sidecar les liste — on détient donc un blob les contenant), **rien
+  n'est écrit** ; sinon on enregistre la liste complète (~32 o/chunk).
+- **packs-only** : `Store::blob()` réassemble à la demande (BLAKE3
+  revérifié), écrit le blob v1 en cache, pose un marqueur
+  `blob-cache/<hash>` (contenu = taille, mtime = dernier usage) puis
+  évictie en LRU jusqu'à `MYCEL_BLOB_CACHE_MB` (défaut 512 Mio) — sans
+  jamais toucher aux packs/chunks ; les blobs référencés par un manifeste
+  vivant sont protégés (v1 simple : LRU des non-référencés d'abord).
+  `myc-run::materialize` est **inchangé** : il appelle `Store::blob`, qui
+  matérialise puis hardlinke. `Store::evict_blob_cache()` est public (un
+  futur `myc gc --lean` s'y branchera) ; le GC purge les marqueurs
+  orphelins.
+- **GC par mode** : transfer = comportement §2 ; lean = les sidecars lean
+  ne référencent aucun pack, donc les packs d'une époque transfer deviennent
+  orphelins et sont recyclés (cohérent : lean = sans packs) ; packs-only =
+  sidecars des blobs morts supprimés, packs des sidecars vivants
+  **conservés** (un blob évincé du cache garde ses chunks — testé).
+
+### 9.3 Limites assumées
+
+- **lean → transfer** : le backfill ne réécrit pas les packs d'un blob
+  déjà sidecaré (raccourci d'idempotence). Migrer un store lean vers
+  transfer = supprimer les sidecars et re-ingester (future commande
+  dédiée possible).
+- **lean, push chunké source** : `myc-hub/chunkio` lit les chunks dans
+  les packs ; un store lean n'en a pas — le push d'un blob chunké depuis
+  un store lean repasse par la route blob v1 (correct, non optimal). Une
+  future source « re-découper le blob v1 à la volée » comblerait le trou
+  sans packs.
+- **packs-only + v1** : un store packs-only ouvert *sans*
+  `MYCEL_CHUNKED=1` ne voit pas les blobs chunkés (la voie v1 reste
+  strictement inchangée) — ouvrir toujours un store packs-only en v2.
+- **packs-only** : export et hub servent via réassemblage (cache) ; un
+  disque qui perd un pack perd le blob (en transfer/lean, les blobs v1
+  restent la redondance).
+
+### 9.4 Mesures (store vierge par mode, corpus ×3 images, amd64, release)
+
+**Disque après ingest, avant tout run** :
+
+| Mode | Blobs v1 (o) | Packs+idx+bloom (o) | Sidecars (o) | **Total (o)** | Mio | vs v1 |
+|---|---:|---:|---:|---:|---:|---:|
+| v1 (référence) | 62 975 020 | 0 | 0 | 62 975 020 | 60,06 | — |
+| transfer | 62 975 020 | 29 633 971 | 470 759 | **93 079 750** | 88,77 | **+47,8 %** |
+| lean | 62 975 020 | 0 | 439 421 | **63 414 441** | 60,48 | **+0,70 %** |
+| packs-only | 3 496 176 | 29 633 971 | 470 759 | **33 600 906** | 32,04 | **−46,6 %** |
+
+- Les packs sont **bit-à-bit identiques** entre transfer et packs-only
+  (nommés par BLAKE3 de leurs octets : déterminisme vérifié sur tout le
+  corpus).
+- packs-only : 59,5 Mio de blobs ≥ 64 Kio deviennent 29,6 Mio de packs
+  (zstd ×0,50) + 0,45 Mio de sidecars ; les 3,5 Mio restants sont les
+  fichiers < 64 Kio (toujours en blobs v1).
+- Sidecars lean (439 421 o) < sidecars pleins (470 759 o) : 32 vs 34
+  o/chunk, malgré les sidecars « rien de nouveau » omis.
+
+**Temps** (release ; l'ingest inclut le pull réseau — variance, détail
+par image dans les logs du script) :
+
+| Mode | Ingest total 3 images (ms) | `run alpine -- echo hi`, médiane de 3 (ms) | 1er run (ms) | runs 2–3 (ms) |
+|---|---:|---:|---:|---:|
+| v1 | 6 710 | 37 | 37 | 36–37 |
+| transfer | 11 013 | 30 | 34 | 29–30 |
+| lean | 6 789 | 31 | 36 | 31 |
+| packs-only | 7 496 | 33 | **104** | 32–33 |
+
+- **Ingest** : lean ≈ v1 (+1,2 %) ; packs-only +11,7 % (chunking + zstd,
+  mais pas de double écriture du blob) ; transfer +64 % (double écriture ;
+  l'ingest 3.21 de transfer a mesuré 4,7 s contre 1,5–1,8 s ailleurs —
+  pull + indexation, à re-mesurer le hub chunké en vue).
+- **Matérialisation** : à chaud, tous les modes sont équivalents
+  (29–37 ms). En packs-only, le **premier** run paie le réassemblage des
+  10 blobs chunkés d'alpine (~15,5 Mio décompressés) : 104 ms vs 32 ms
+  ensuite, soit **+67 ms une fois** — imperceptible. Cache après 3 runs :
+  10 blobs, budget défaut 512 Mio.
+
+### 9.5 Recommandation : `lean` par défaut
+
+L'hypothèse à tester (« lean par défaut — quasi zéro surcoût, migration
+future vers packs-only ») est **confirmée par la mesure** :
+
+- **+0,70 % de disque** pour une connaissance chunk complète (négociation
+  hub prête côté pull, §9.1), +1,2 % d'ingest, runs identiques, blobs v1
+  et hardlinks intacts : l'option est quasi gratuite.
+- **transfer** reste le bon mode pour les **hubs/serveurs** et les
+  machines qui **poussent** par chunks (§8) : là, les packs sont un cache
+  de transfert effectif, pas du ballast. C'est aussi le défaut actuel —
+  ne rien changer avant décision explicite.
+- **packs-only** est la réponse disque contraint : −46,6 % mesurés,
+  coût unique de ~70 ms au premier run d'un env — au prix d'une
+  dépendance forte aux packs (interop v1 cassée, réassemblage avant
+  hardlink). Cible naturelle des clients une fois l'écosystème 100 % v2.
+- **Trajectoire** : un store lean peut basculer en packs-only à tout
+  moment (blobs présents ⇒ switch autorisé) ; l'inverse est gardé-fou
+  (refus tant que des blobs ne vivent qu'en packs).
+
+### 9.6 Tests
+
+`cargo test -p myc-store` : **32 verts** (les 23 existants inchangés + 9
+nouveaux). Nouveaux : noms de modes ; round-trip lean sans aucun pack ;
+lean n'écrit rien quand tous les chunks sont connus ; round-trip
+packs-only (pas de blob v1, matérialisation à la demande, cache) ;
+éviction LRU ne touche jamais aux chunks (rebuild après éviction) ;
+refus de changement de mode avec message de régénération puis acceptation
+après matérialisation ; cache blob (record/LRU/orphelins).
+`cargo fmt` + `cargo clippy -p myc-store --all-targets -- -D warnings`
+verts.

@@ -34,6 +34,30 @@
 //! * The **sidecar** gives the ordered chunk list of one blob plus the pack
 //!   table it depends on; it is what a future hub protocol will diff to
 //!   compute `missing_chunks`.
+//!
+//! ## Disk modes (`MYCEL_CHUNK_MODE`, see [`ChunkMode`])
+//!
+//! The +48,7 % disk overhead of the original design (v1 blobs *and* packs
+//! coexisting) is now arbitrated per store:
+//!
+//! * **transfer** — v1 blob + packs (the original behavior, default);
+//! * **lean** — v1 blob + sidecars only, no pack is ever written. The
+//!   sidecars are enough for chunk *negotiation* (`has_chunk` /
+//!   `missing_chunks`), which is all the hub needs to know what we have;
+//! * **packs-only** — chunked files store no v1 blob at all; packs are the
+//!   source of truth and the blob is reassembled on demand
+//!   ([`crate::Store::blob`]) into a size-bounded LRU cache
+//!   (`MYCEL_BLOB_CACHE_MB`).
+//!
+//! The mode is recorded in `chunk-mode` at the store root on first v2 use
+//! and must stay coherent (see [`crate::Store::open`]).
+//!
+//! In every mode the *knowledge* oracle (`has_chunk`, `missing_chunks`) is
+//! sidecar-driven: a chunk is known iff some sidecar lists it. This holds
+//! for packs too, because a pack is only ever written together with the
+//! sidecar that references it and GC keeps packs alive only while a
+//! surviving sidecar references them — so scanning sidecars is both
+//! complete and mode-independent.
 
 use crate::{io_err, Result, StoreError};
 use std::collections::{HashMap, HashSet};
@@ -62,6 +86,77 @@ const ZSTD_LEVEL: i32 = 3;
 const PACK_IDX_MAGIC: &[u8; 9] = b"MYCPACKI1";
 const BLOOM_MAGIC: &[u8; 9] = b"MYCBLOOM1";
 const SIDECAR_MAGIC: &[u8; 9] = b"MYCCHNKI1";
+/// Lean sidecars (no pack table): `[magic][u32 count][count x 32B ids]`.
+const SIDECAR_LEAN_MAGIC: &[u8; 9] = b"MYCCHNKL1";
+
+/// Name of the file (under the store root) that pins the store's chunk mode.
+const CHUNK_MODE_FILE: &str = "chunk-mode";
+
+// ---------------------------------------------------------------------------
+// Chunk modes
+// ---------------------------------------------------------------------------
+
+/// How the v2 chunk layer spends disk, per store (`MYCEL_CHUNK_MODE`).
+///
+/// The mode is written to `chunk-mode` on first v2 use and is then part of
+/// the store's identity: switching is allowed only when it cannot orphan
+/// data that exists solely as packs (see [`crate::Store::open`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChunkMode {
+    /// v1 blob + packs (default, the original v2 behavior). Maximum disk,
+    /// chunked transfers possible, `myc-run` hardlinks the v1 files.
+    Transfer,
+    /// v1 blob + chunk sidecars, **no packs**: the chunks are only used for
+    /// negotiation (knowing what we have). Disk = v1 + a few KiB of
+    /// sidecars.
+    Lean,
+    /// No v1 blob for chunked files: packs are the source of truth and the
+    /// blob is reassembled on demand into a size-bounded LRU cache
+    /// (`MYCEL_BLOB_CACHE_MB`, see [`crate::blob_cache`]). Minimum disk,
+    /// first use of an environment pays reassembly.
+    PacksOnly,
+}
+
+impl ChunkMode {
+    pub const TRANSFER: &str = "transfer";
+    pub const LEAN: &str = "lean";
+    pub const PACKS_ONLY: &str = "packs-only";
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            ChunkMode::Transfer => Self::TRANSFER,
+            ChunkMode::Lean => Self::LEAN,
+            ChunkMode::PacksOnly => Self::PACKS_ONLY,
+        }
+    }
+
+    /// Parse the canonical names used in `MYCEL_CHUNK_MODE` and in the
+    /// `chunk-mode` file.
+    pub fn parse(name: &str) -> Option<ChunkMode> {
+        match name.trim() {
+            Self::TRANSFER => Some(ChunkMode::Transfer),
+            Self::LEAN => Some(ChunkMode::Lean),
+            Self::PACKS_ONLY => Some(ChunkMode::PacksOnly),
+            _ => None,
+        }
+    }
+
+    /// `$MYCEL_CHUNK_MODE` (default [`ChunkMode::Transfer`]); an unknown
+    /// value is an error rather than a silent fallback.
+    pub fn from_env() -> Result<ChunkMode> {
+        match std::env::var("MYCEL_CHUNK_MODE") {
+            Ok(v) => Self::parse(&v).ok_or_else(|| {
+                StoreError::Chunk(format!(
+                    "invalid MYCEL_CHUNK_MODE '{v}' (expected {}, {} or {})",
+                    Self::TRANSFER,
+                    Self::LEAN,
+                    Self::PACKS_ONLY
+                ))
+            }),
+            Err(_) => Ok(ChunkMode::Transfer),
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Bloom filter
@@ -205,6 +300,7 @@ impl PackIdx {
 }
 
 /// chunks/<blob-hash>.chunks: the blob's ordered chunk recipe.
+#[derive(Debug)]
 struct Sidecar {
     /// Pack content hashes (raw 32 bytes) referenced by this blob.
     packs: Vec<[u8; 32]>,
@@ -263,6 +359,66 @@ impl Sidecar {
             chunks,
             slots,
         })
+    }
+}
+
+/// A sidecar as found on disk, in either format.
+///
+/// * full (`MYCCHNKI1`): pack table + ordered chunk ids (transfer,
+///   packs-only) — the reassembly recipe;
+/// * lean (`MYCCHNKL1`): ordered chunk ids only — negotiation knowledge
+///   without the pack bytes.
+#[derive(Debug)]
+enum AnySidecar {
+    Full(Sidecar),
+    Lean(Vec<ChunkId>),
+}
+
+impl AnySidecar {
+    fn decode(bytes: &[u8]) -> Option<AnySidecar> {
+        if bytes.len() < 9 {
+            return None;
+        }
+        if bytes[0..9] == *SIDECAR_MAGIC {
+            Sidecar::from_bytes(bytes).map(AnySidecar::Full)
+        } else if bytes[0..9] == *SIDECAR_LEAN_MAGIC {
+            let count = u32::from_be_bytes(bytes.get(9..13)?.try_into().ok()?) as usize;
+            let body = bytes.get(13..13 + count * 32)?;
+            let mut chunks = Vec::with_capacity(count);
+            for i in 0..count {
+                let mut id = [0u8; 32];
+                id.copy_from_slice(&body[i * 32..(i + 1) * 32]);
+                chunks.push(id);
+            }
+            Some(AnySidecar::Lean(chunks))
+        } else {
+            None
+        }
+    }
+
+    fn chunks(&self) -> &[ChunkId] {
+        match self {
+            AnySidecar::Full(sc) => &sc.chunks,
+            AnySidecar::Lean(ids) => ids,
+        }
+    }
+
+    /// Pack content hashes this sidecar keeps alive (empty for lean).
+    fn pack_refs(&self) -> &[[u8; 32]] {
+        match self {
+            AnySidecar::Full(sc) => &sc.packs,
+            AnySidecar::Lean(_) => &[],
+        }
+    }
+
+    fn encode_lean(chunks: &[ChunkId]) -> Vec<u8> {
+        let mut out = Vec::with_capacity(13 + chunks.len() * 32);
+        out.extend_from_slice(SIDECAR_LEAN_MAGIC);
+        out.extend_from_slice(&(chunks.len() as u32).to_be_bytes());
+        for id in chunks {
+            out.extend_from_slice(id);
+        }
+        out
     }
 }
 
@@ -373,6 +529,43 @@ fn sidecar_path(root: &Path, blob_hash: &str) -> PathBuf {
 
 fn pack_path(root: &Path, name: &str) -> PathBuf {
     root.join("packs").join(format!("pack-{name}.zst"))
+}
+
+/// Does this blob have a (full or lean) chunk sidecar?
+pub fn sidecar_exists(root: &Path, blob_hash: &str) -> bool {
+    sidecar_path(root, blob_hash).exists()
+}
+
+/// The store's recorded chunk mode, or `None` before the first v2 use.
+/// A present-but-unreadable `chunk-mode` file is an error, not a silent
+/// reset: the mode decides where data lives.
+pub fn read_chunk_mode(root: &Path) -> Result<Option<ChunkMode>> {
+    match fs::read_to_string(root.join(CHUNK_MODE_FILE)) {
+        Ok(s) => ChunkMode::parse(&s).map(Some).ok_or_else(|| {
+            StoreError::Chunk(format!(
+                "corrupt {} file (content: '{s}') — expected {}, {} or {}",
+                CHUNK_MODE_FILE,
+                ChunkMode::TRANSFER,
+                ChunkMode::LEAN,
+                ChunkMode::PACKS_ONLY
+            ))
+        }),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(io_err(&root.join(CHUNK_MODE_FILE), e)),
+    }
+}
+
+/// Record the mode at first v2 use (first writer wins, like every other
+/// store file).
+pub fn write_chunk_mode(root: &Path, mode: ChunkMode) -> Result<()> {
+    write_noclobber(root, &root.join(CHUNK_MODE_FILE), mode.as_str().as_bytes())
+}
+
+/// Overwrite the mode file after a validated switch (plain write: the file
+/// is a single tiny line and switches are rare).
+pub fn overwrite_chunk_mode(root: &Path, mode: ChunkMode) -> Result<()> {
+    let p = root.join(CHUNK_MODE_FILE);
+    fs::write(&p, mode.as_str().as_bytes()).map_err(|e| io_err(&p, e))
 }
 
 /// Write `bytes` to `dest` atomically (temp file + noclobber rename).
@@ -545,45 +738,122 @@ pub fn index_blob(root: &Path, blob_hash: &str, data: &[u8]) -> Result<IndexStat
     })
 }
 
+/// Lean indexing: compute the blob's chunk ids and *record what we now
+/// know*, without writing any pack. If every chunk is already known (some
+/// other sidecar lists it — we then hold a blob containing it, so a hub
+/// could serve it by re-cutting), nothing is written at all; otherwise a
+/// lean sidecar records the full ordered id list. Disk cost: ~32 B/chunk,
+/// only when the blob teaches the store something new.
+pub fn lean_index_blob(root: &Path, blob_hash: &str, data: &[u8]) -> Result<IndexStats> {
+    if sidecar_exists(root, blob_hash) {
+        return Ok(IndexStats {
+            skipped: true,
+            ..IndexStats::default()
+        });
+    }
+    let bounds = myc_chunk::chunk_bounds(data);
+    if bounds.is_empty() {
+        return Ok(IndexStats::default());
+    }
+    let mut known = known_chunk_ids(root)?;
+    let mut plan: Vec<ChunkId> = Vec::with_capacity(bounds.len());
+    let mut new_chunk_bytes = 0u64;
+    let mut reused_bytes = 0u64;
+    let mut new_count = 0usize;
+    for &(s, e) in &bounds {
+        let id: ChunkId = *blake3::hash(&data[s..e]).as_bytes();
+        if known.insert(id) {
+            new_count += 1;
+            new_chunk_bytes += (e - s) as u64;
+        } else {
+            reused_bytes += (e - s) as u64;
+        }
+        plan.push(id);
+    }
+    if new_count > 0 {
+        let chunks_dir = root.join("chunks");
+        fs::create_dir_all(&chunks_dir).map_err(|e| io_err(&chunks_dir, e))?;
+        write_noclobber(
+            root,
+            &sidecar_path(root, blob_hash),
+            &AnySidecar::encode_lean(&plan),
+        )?;
+    }
+    Ok(IndexStats {
+        skipped: false,
+        total_chunks: plan.len(),
+        new_chunks: new_count,
+        new_chunk_bytes,
+        reused_chunk_bytes: reused_bytes,
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Read path
 // ---------------------------------------------------------------------------
 
 /// Ordered chunk ids of a chunked blob, or `None` if it has no sidecar
 /// (blob below the size threshold, or ingested while chunking was off).
+/// Works for both sidecar formats (full and lean).
 pub fn blob_chunks(root: &Path, blob_hash: &str) -> Result<Option<Vec<ChunkId>>> {
     match fs::read(sidecar_path(root, blob_hash)) {
         Ok(bytes) => {
-            let sc = Sidecar::from_bytes(&bytes).ok_or_else(|| {
+            let sc = AnySidecar::decode(&bytes).ok_or_else(|| {
                 StoreError::Chunk(format!("corrupt chunk sidecar for blob {blob_hash}"))
             })?;
-            Ok(Some(sc.chunks))
+            Ok(Some(sc.chunks().to_vec()))
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(io_err(&sidecar_path(root, blob_hash), e)),
     }
 }
 
-/// Chunks of `wanted` that this store does not have, in `wanted` order.
-pub fn missing_chunks(root: &Path, wanted: &[ChunkId]) -> Result<Vec<ChunkId>> {
-    let mut index = ChunkIndex::scan(root)?;
-    let mut missing = Vec::new();
-    for id in wanted {
-        if index.locate(id)?.is_none() {
-            missing.push(*id);
+/// Every chunk id any sidecar (full or lean) lists — the store's complete
+/// chunk knowledge, whatever the mode. Complete for packs too: a pack is
+/// only written alongside the sidecar referencing it, and GC keeps a pack
+/// only while some surviving sidecar references it. Unreadable sidecar
+/// files are skipped: one corrupt sidecar must not blind the oracle.
+pub fn known_chunk_ids(root: &Path) -> Result<HashSet<ChunkId>> {
+    let mut known = HashSet::new();
+    let dir = root.join("chunks");
+    let entries = match fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(known),
+        Err(e) => return Err(io_err(&dir, e)),
+    };
+    for entry in entries {
+        let entry = entry.map_err(|e| io_err(&dir, e))?;
+        let name = entry.file_name().to_string_lossy().to_string();
+        if !name.ends_with(".chunks") {
+            continue;
+        }
+        if let Ok(bytes) = fs::read(entry.path()) {
+            if let Some(sc) = AnySidecar::decode(&bytes) {
+                known.extend(sc.chunks().iter().copied());
+            }
         }
     }
-    Ok(missing)
+    Ok(known)
 }
 
-/// Does the store hold this chunk (in any pack)? Bloom filters first, pack
-/// index confirmation second — the answer itself has no false positives.
+/// Chunks of `wanted` that this store does not have, in `wanted` order.
+/// Knowledge = what the sidecars list (see [`known_chunk_ids`]).
+pub fn missing_chunks(root: &Path, wanted: &[ChunkId]) -> Result<Vec<ChunkId>> {
+    let known = known_chunk_ids(root)?;
+    Ok(wanted
+        .iter()
+        .filter(|id| !known.contains(*id))
+        .copied()
+        .collect())
+}
+
+/// Does the store hold this chunk? True iff some sidecar lists it — the
+/// store then has a blob containing those bytes and can produce the chunk
+/// (from a pack, or by re-cutting the v1 blob).
 pub fn has_chunk(root: &Path, id: &ChunkId) -> bool {
-    let mut index = match ChunkIndex::scan(root) {
-        Ok(i) => i,
-        Err(_) => return false,
-    };
-    index.locate(id).unwrap_or(None).is_some()
+    known_chunk_ids(root)
+        .map(|k| k.contains(id))
+        .unwrap_or(false)
 }
 
 /// Rebuild the full content of a chunked blob from its packs and verify it
@@ -592,8 +862,20 @@ pub fn has_chunk(root: &Path, id: &ChunkId) -> bool {
 pub fn reassemble(root: &Path, blob_hash: &str) -> Result<Vec<u8>> {
     let bytes = fs::read(sidecar_path(root, blob_hash))
         .map_err(|_| StoreError::Chunk(format!("blob {blob_hash} has no chunk sidecar")))?;
-    let sc = Sidecar::from_bytes(&bytes)
-        .ok_or_else(|| StoreError::Chunk(format!("corrupt chunk sidecar for blob {blob_hash}")))?;
+    let sc = match AnySidecar::decode(&bytes) {
+        Some(AnySidecar::Full(sc)) => sc,
+        Some(AnySidecar::Lean(_)) => {
+            return Err(StoreError::Chunk(format!(
+                "blob {blob_hash} has a lean sidecar (no packs were written for it) — \
+                 reassembly is impossible; the v1 blob file must exist"
+            )));
+        }
+        None => {
+            return Err(StoreError::Chunk(format!(
+                "corrupt chunk sidecar for blob {blob_hash}"
+            )));
+        }
+    };
     let mut index = ChunkIndex::scan(root)?;
     let mut handles: HashMap<String, fs::File> = HashMap::new();
     let mut out = Vec::new();
@@ -637,9 +919,14 @@ pub fn reassemble(root: &Path, blob_hash: &str) -> Result<Vec<u8>> {
 // ---------------------------------------------------------------------------
 
 /// Delete sidecars of blobs that no longer exist and packs no surviving
-/// sidecar references. Returns (files deleted, bytes freed). Chunk-level
-/// reference counting stays a future step; this reachability sweep is exact
-/// for whole packs, which is the granularity the format controls.
+/// sidecar references. Returns (files deleted, bytes freed). Works in all
+/// three modes: lean sidecars reference no packs, so in a lean store any
+/// leftover pack (from a previous transfer era) becomes unreferenced and is
+/// reclaimed. In packs-only mode this deliberately never touches the packs
+/// of *live* sidecars: a blob evicted from the v1 cache keeps its chunks.
+/// Chunk-level reference counting stays a future step; this reachability
+/// sweep is exact for whole packs, which is the granularity the format
+/// controls.
 pub fn gc_sweep(root: &Path, live_blobs: &HashSet<String>) -> Result<(u64, u64)> {
     let mut deleted = 0u64;
     let mut freed = 0u64;
@@ -661,8 +948,8 @@ pub fn gc_sweep(root: &Path, live_blobs: &HashSet<String>) -> Result<(u64, u64)>
                 continue;
             }
             if let Ok(bytes) = fs::read(entry.path()) {
-                if let Some(sc) = Sidecar::from_bytes(&bytes) {
-                    for p in &sc.packs {
+                if let Some(sc) = AnySidecar::decode(&bytes) {
+                    for p in sc.pack_refs() {
                         referenced.insert(hex::encode(p));
                     }
                 }
@@ -840,9 +1127,18 @@ mod tests {
     }
 
     fn chunked_store(tag: &str) -> (tempfile::TempDir, Store) {
+        mode_store(tag, ChunkMode::Transfer)
+    }
+
+    fn mode_store(tag: &str, mode: ChunkMode) -> (tempfile::TempDir, Store) {
         let dir = tempfile::tempdir().expect("tempdir");
-        let store = Store::open_chunked(dir.path().join(tag)).expect("open");
+        let store = Store::open_chunked_with_mode(dir.path().join(tag), mode).expect("open");
         (dir, store)
+    }
+
+    /// Path of the v1 blob file inside the store (tests only).
+    fn object_file(store: &Store, hash: &str) -> std::path::PathBuf {
+        store.root().join("objects").join(&hash[..2]).join(hash)
     }
 
     /// 256 KiB with realistic structure: random head, a repeated middle, and
@@ -962,7 +1258,7 @@ mod tests {
         let (hash, _) = store.put_blob(&mut &data[..]).unwrap();
         let before = chunk_stats(store.root()).unwrap();
         // A second handle replays the same blob (the dedup-hit path).
-        let other = Store::open_chunked(store.root()).unwrap();
+        let other = Store::open_chunked_with_mode(store.root(), ChunkMode::Transfer).unwrap();
         let (h2, _) = other.put_blob(&mut &data[..]).unwrap();
         assert_eq!(hash, h2);
         let after = chunk_stats(store.root()).unwrap();
@@ -1040,10 +1336,188 @@ mod tests {
     #[test]
     fn non_chunked_store_writes_no_chunk_files() {
         let dir = tempfile::tempdir().unwrap();
-        let store = Store::open_inner(dir.path().join("s"), false).unwrap();
+        let store = Store::open_inner(dir.path().join("s"), false, None).unwrap();
         let (hash, _) = store.put_blob(&mut &structured_blob(5)[..]).unwrap();
         assert!(!store.root().join("packs").exists());
         assert!(!store.root().join("chunks").exists());
         assert!(store.blob_chunks(&hash).unwrap().is_none());
+    }
+
+    // ---- disk modes (MYCEL_CHUNK_MODE) ----
+
+    #[test]
+    fn chunk_mode_names_round_trip() {
+        for mode in [ChunkMode::Transfer, ChunkMode::Lean, ChunkMode::PacksOnly] {
+            assert_eq!(ChunkMode::parse(mode.as_str()), Some(mode));
+        }
+        assert_eq!(ChunkMode::parse("transfer"), Some(ChunkMode::Transfer));
+        assert_eq!(ChunkMode::parse(" lean\n"), Some(ChunkMode::Lean));
+        assert_eq!(ChunkMode::parse("packs-only"), Some(ChunkMode::PacksOnly));
+        assert_eq!(ChunkMode::parse("turbo"), None);
+    }
+
+    #[test]
+    fn lean_mode_round_trip_writes_no_packs() {
+        let (_d, store) = mode_store("lean", ChunkMode::Lean);
+        let data = structured_blob(7);
+        let (hash, _) = store.put_blob(&mut &data[..]).unwrap();
+        // v1 blob present, sidecar present, ZERO pack bytes on disk.
+        assert!(object_file(&store, &hash).exists());
+        let ids = store.blob_chunks(&hash).unwrap().expect("lean sidecar");
+        assert_eq!(ids, myc_chunk::chunk_hashes(&data));
+        let stats = chunk_stats(store.root()).unwrap();
+        assert_eq!(stats.packs, 0);
+        assert_eq!(stats.pack_disk_bytes, 0);
+        assert_eq!(stats.sidecars, 1);
+        // Knowledge: everything this blob is made of is known, so a hub
+        // would transfer nothing for it again.
+        assert!(store.missing_chunks(&ids).is_empty());
+        // Lean sidecars cannot reassemble (that's the deal: no packs).
+        let err = store.reassemble_blob(&hash).unwrap_err();
+        assert!(err.to_string().contains("lean"), "got {err}");
+        // Idempotent re-ingest.
+        let before = chunk_stats(store.root()).unwrap();
+        let other = Store::open_chunked_with_mode(store.root(), ChunkMode::Lean).unwrap();
+        let (h2, _) = other.put_blob(&mut &data[..]).unwrap();
+        assert_eq!(hash, h2);
+        assert_eq!(chunk_stats(store.root()).unwrap(), before);
+    }
+
+    #[test]
+    fn lean_mode_writes_nothing_when_all_chunks_known() {
+        let (_d, store) = mode_store("lean2", ChunkMode::Lean);
+        let a = structured_blob(8);
+        let (ha, _) = store.put_blob(&mut &a[..]).unwrap();
+        // B = strict prefix of A cut on a chunk boundary: every chunk of B
+        // is already known via A's sidecar, and B is still chunkable.
+        let bounds = myc_chunk::chunk_bounds(&a);
+        let cut = bounds[bounds.len() - 2].1;
+        let b = a[..cut].to_vec();
+        assert!(b.len() as u64 >= CHUNK_MIN_BLOB_SIZE);
+        let (hb, _) = store.put_blob(&mut &b[..]).unwrap();
+        assert_ne!(ha, hb);
+        // Nothing new to teach: no sidecar for B, no pack ever.
+        assert!(store.blob_chunks(&hb).unwrap().is_none());
+        assert!(object_file(&store, &hb).exists()); // v1 blob is the truth
+        assert!(store
+            .missing_chunks(&myc_chunk::chunk_hashes(&b))
+            .is_empty());
+        assert_eq!(chunk_stats(store.root()).unwrap().sidecars, 1);
+    }
+
+    #[test]
+    fn packs_only_round_trip_materializes_on_demand() {
+        let (_d, store) = mode_store("po", ChunkMode::PacksOnly);
+        let data = structured_blob(9);
+        let (hash, _) = store.put_blob(&mut &data[..]).unwrap();
+        // Chunked blob: NO v1 file on disk, packs + sidecar are the truth…
+        assert!(!object_file(&store, &hash).exists());
+        assert!(sidecar_exists(store.root(), &hash));
+        assert!(store.has_blob(&hash)); // …but the blob counts as present
+        assert!(store.chunk_stats().unwrap().packs > 0);
+        // Small files keep their plain v1 blob (nothing else backs them).
+        let (small, _) = store.put_blob(&mut &vec![1u8; 4096][..]).unwrap();
+        assert!(object_file(&store, &small).exists());
+        // On-demand materialization: blob() reassembles, verifies, caches.
+        let path = store.blob(&hash).unwrap();
+        assert!(path.exists());
+        assert_eq!(fs::read(&path).unwrap(), data);
+        assert!(crate::blob_cache::is_cached(store.root(), &hash));
+        // Second call takes the fast path (file is there now).
+        assert_eq!(store.blob(&hash).unwrap(), path);
+        store.verify_blob(&hash).unwrap();
+    }
+
+    #[test]
+    fn packs_only_eviction_never_touches_chunks() {
+        use myc_manifest::{Entry, EntryKind, Manifest, RuntimeConfig, SCHEMA_VERSION};
+
+        let (_d, store) = mode_store("poev", ChunkMode::PacksOnly);
+        let data = structured_blob(10);
+        let (hash, _) = store.put_blob(&mut &data[..]).unwrap();
+        store
+            .put_manifest(&Manifest {
+                schema: SCHEMA_VERSION,
+                name: "app:live".into(),
+                origin: None,
+                os: "linux".into(),
+                arch: "amd64".into(),
+                created: "2026-01-01T00:00:00Z".into(),
+                config: RuntimeConfig::default(),
+                entries: vec![Entry {
+                    path: "/data".into(),
+                    kind: EntryKind::File,
+                    mode: 0o644,
+                    uid: 0,
+                    gid: 0,
+                    size: data.len() as u64,
+                    blake3: Some(hash.clone()),
+                    target: None,
+                    device: None,
+                }],
+            })
+            .unwrap();
+        // Materialize once, then shrink the budget to nothing.
+        let path = store.blob(&hash).unwrap();
+        assert!(path.exists());
+        let (evicted, _) = store.evict_blob_cache_with_budget(0).unwrap();
+        assert_eq!(evicted, 0, "live blobs are protected");
+        assert!(path.exists());
+
+        // Unprotected path: a blob no manifest references gets evicted,
+        // and its chunks/packs survive — it can be rebuilt.
+        let (hash2, _) = store.put_blob(&mut &structured_blob(11)[..]).unwrap();
+        let p2 = store.blob(&hash2).unwrap();
+        assert!(p2.exists());
+        let (evicted, _) = store.evict_blob_cache_with_budget(0).unwrap();
+        assert_eq!(evicted, 1);
+        assert!(!p2.exists());
+        assert!(sidecar_exists(store.root(), &hash2));
+        assert!(store.chunk_stats().unwrap().packs > 0);
+        assert!(store.has_blob(&hash2));
+        // …and rebuilt on demand:
+        assert_eq!(
+            fs::read(store.blob(&hash2).unwrap()).unwrap(),
+            structured_blob(11)
+        );
+        // GC with a live manifest keeps the packs-backed blob alive.
+        store.gc().unwrap();
+        assert!(store.has_blob(&hash));
+    }
+
+    #[test]
+    fn mode_switch_refused_until_blobs_are_regenerated() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("s");
+        {
+            let store = Store::open_chunked_with_mode(&root, ChunkMode::PacksOnly).unwrap();
+            let (hash, _) = store.put_blob(&mut &structured_blob(12)[..]).unwrap();
+            assert!(!object_file(&store, &hash).exists()); // packs-only shape
+        }
+        // Switching away while a blob exists only as packs: refused, with
+        // regeneration instructions.
+        for mode in [ChunkMode::Lean, ChunkMode::Transfer] {
+            let err = match Store::open_chunked_with_mode(&root, mode) {
+                Err(e) => e.to_string(),
+                Ok(_) => panic!("switch to {:?} should have been refused", mode),
+            };
+            assert!(err.contains("cannot switch chunk mode"), "got {err}");
+            assert!(err.contains("myc run"), "regeneration hint missing: {err}");
+        }
+        // Same mode still opens fine.
+        Store::open_chunked_with_mode(&root, ChunkMode::PacksOnly).unwrap();
+        // Regenerate (any use materializes + caches), then the switch is
+        // accepted.
+        {
+            let store = Store::open_chunked_with_mode(&root, ChunkMode::PacksOnly).unwrap();
+            // Materialize every packs-only blob: scan sidecars directly.
+            for entry in fs::read_dir(store.root().join("chunks")).unwrap() {
+                let name = entry.unwrap().file_name().to_string_lossy().to_string();
+                if let Some(h) = name.strip_suffix(".chunks") {
+                    store.blob(h).unwrap();
+                }
+            }
+        }
+        Store::open_chunked_with_mode(&root, ChunkMode::Lean).unwrap();
     }
 }

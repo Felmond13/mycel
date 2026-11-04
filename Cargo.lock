@@ -899,6 +899,7 @@ dependencies = [
  "myc-manifest",
  "myc-run",
  "myc-store",
+ "serde_json",
  "sha2",
  "tempfile",
  "thiserror",
@@ -976,6 +977,7 @@ dependencies = [
  "anyhow",
  "axum",
  "blake3",
+ "hex",
  "myc-manifest",
  "myc-store",
  "reqwest",
@@ -985,6 +987,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "tokio-util",
+ "zstd",
 ]
 
 [[package]]
