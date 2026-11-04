@@ -892,7 +892,7 @@ dependencies = [
 
 [[package]]
 name = "myc-backend"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "ctrlc",
  "hex",
@@ -908,7 +908,7 @@ dependencies = [
 
 [[package]]
 name = "myc-build"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "blake3",
  "myc-manifest",
@@ -922,14 +922,14 @@ dependencies = [
 
 [[package]]
 name = "myc-chunk"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "blake3",
 ]
 
 [[package]]
 name = "myc-cli"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -953,7 +953,7 @@ dependencies = [
 
 [[package]]
 name = "myc-compose"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "myc-manifest",
  "myc-oci",
@@ -967,7 +967,7 @@ dependencies = [
 
 [[package]]
 name = "myc-delta"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "blake3",
  "myc-chunk",
@@ -976,7 +976,7 @@ dependencies = [
 
 [[package]]
 name = "myc-hub"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -996,7 +996,7 @@ dependencies = [
 
 [[package]]
 name = "myc-lazy"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "fuser",
@@ -1011,7 +1011,7 @@ dependencies = [
 
 [[package]]
 name = "myc-manifest"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "blake3",
  "hex",
@@ -1022,7 +1022,7 @@ dependencies = [
 
 [[package]]
 name = "myc-oci"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "flate2",
  "hex",
@@ -1040,7 +1040,7 @@ dependencies = [
 
 [[package]]
 name = "myc-query"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "myc-manifest",
  "myc-oci",
@@ -1054,7 +1054,7 @@ dependencies = [
 
 [[package]]
 name = "myc-run"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "libc",
  "myc-manifest",
@@ -1068,7 +1068,7 @@ dependencies = [
 
 [[package]]
 name = "myc-store"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "blake3",
  "flate2",
@@ -1086,7 +1086,7 @@ dependencies = [
 
 [[package]]
 name = "myc-web"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "axum",
