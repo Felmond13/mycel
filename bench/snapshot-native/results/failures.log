@@ -1,0 +1,12 @@
+--- run /tmp/myc-snap-native.xvxnZG/run.hVA4Qh (mode=copy prefault=off class=inert) ---
+ch.log:
+cloud-hypervisor:   0.006200s: <vcpu0> WARN:vmm/src/cpu.rs:273 -- Kernel lacks CONFIG_SCHED_CORE support - no SMT isolation
+console.log:
+--- run /tmp/myc-snap-native.xvxnZG/run.UbVIbR (mode=copy prefault=off class=inert) ---
+ch.log:
+cloud-hypervisor:   0.010883s: <vcpu0> WARN:vmm/src/cpu.rs:273 -- Kernel lacks CONFIG_SCHED_CORE support - no SMT isolation
+console.log:
+--- run /tmp/myc-snap-native.xvxnZG/run.81Tf4Y (mode=copy prefault=off class=inert) ---
+ch.log:
+cloud-hypervisor:   0.008782s: <vcpu0> WARN:vmm/src/cpu.rs:273 -- Kernel lacks CONFIG_SCHED_CORE support - no SMT isolation
+console.log:

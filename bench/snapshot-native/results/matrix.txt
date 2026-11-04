@@ -1,0 +1,3 @@
+variante                        ok inert autres  med_ms p95_ms   n<200ms   x_boot
+(interrompu : restore inert)     -     -      -       -      -         -        -
+VERDICT : NO-GO — restore inert sur CET hôte (copy-prefault-off (run 1))

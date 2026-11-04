@@ -1,0 +1,15 @@
+=== Mycel snapshot-native kit — verdict (Wed Nov  4 01:55:35 UTC 2026) ===
+hôte : 6.18.54.1-microsoft-standard-WSL2 — 11th Gen Intel(R) Core(TM) i5-1145G7 @ 2.60GHz
+
+Baseline boot à froid :
+n=10 median_ms=423.405 p95_ms=569.735 mean_ms=441.927 cv_pct=11.2
+
+snapshot_creation_ms=233
+memory_size=512M
+
+Matrice restore (ok = 200 reçu ET battement récent ; n<200ms = restores sous le seuil) :
+variante                        ok inert autres  med_ms p95_ms   n<200ms   x_boot
+(interrompu : restore inert)     -     -      -       -      -         -        -
+VERDICT : NO-GO — restore inert sur CET hôte (copy-prefault-off (run 1))
+
+GO/NO-GO : NO-GO — restore inert sur cet hôte (voir message ci-dessus).

@@ -1,0 +1,11 @@
+snapshot_dir=/tmp/myc-snap-native.xvxnZG/snapshot
+snapshot_creation_ms=233
+memory_size=512M
+files:
+total 524324
+drwxr-xr-x  2 root root       100 Nov  4 02:54 .
+drwx------ 17 root root       340 Nov  4 02:54 ..
+-rw-------  1 root root      1038 Nov  4 02:54 config.json
+-rw-------  1 root root 536870912 Nov  4 02:54 memory-ranges
+-rw-------  1 root root     31958 Nov  4 02:54 state.json
+513M	/tmp/myc-snap-native.xvxnZG/snapshot
