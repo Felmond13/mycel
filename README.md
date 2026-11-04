@@ -204,10 +204,12 @@ the microVM guest assets (below).
 twin). Sources stay public (BUSL-1.1); releases are prebuilt binaries, the
 client never compiles anything.
 
-**KVM microVM engine (optional, auto-provisioned).** The guest kernel and
-initramfs (`vmlinux-vmfs`, `init-vm.cpio`) are release assets too. On the
-first `myc run --engine kvm-microvm`, any missing asset is downloaded once
-into `~/.mycel/vm-assets/` (sha256-verified when the release ships `.sha256`
+**KVM microVM engine (the Linux default when READY, auto-provisioned).**
+The guest kernel and initramfs (`vmlinux-vmfs`, `init-vm.cpio`) are
+release assets too. On the first kvm-microvm run — which a plain
+`myc run` triggers automatically whenever the engine is READY (`myc
+doctor` says) — any missing asset is downloaded once into
+`~/.mycel/vm-assets/` (sha256-verified when the release ships `.sha256`
 sidecars); `install.sh --with-vm` pre-installs them into
 `/usr/local/share/mycel/` instead. `cloud-hypervisor` and `virtiofsd`
 themselves still come from your distro — `myc doctor` lists every piece
@@ -586,17 +588,28 @@ page cache.
 
 Containers can run in several isolation tiers — Mycel never depends on a
 single one, and the choice is automatic (users never configure it; `myc
-doctor` prints the detected tiers so it is never a mystery):
+doctor` prints the detected tiers and the default it would pick):
 
-- **`native-namespaces`** — rootless user namespaces, the default everywhere
-  Mycel runs today. Shared kernel: Docker-level isolation, not better.
+- **`kvm-microvm`** — a real microVM with its own kernel via Cloud
+  Hypervisor: the tier that ends kernel-sharing, and the **default on
+  Linux whenever it is READY**. `auto` means "strongest complete engine
+  this request can carry": a plain `myc run alpine -- echo hi` boots a VM
+  (one stderr line says so), while pods (`--join-net`), caller-managed
+  run dirs, interactive runs, pasta isolation (`--net isolated`) and
+  rootless port publishing fall back to namespaces with the reason on
+  stderr. Boot benchmark vs Docker (same static binary both sides):
+  `bench/microvm`.
+- **`native-namespaces`** — rootless user namespaces: the fallback (and
+  the only tier for pods and interactive shells), carrying the full
+  feature set. Shared kernel: Docker-level isolation, not better.
 - **`wsl2-twin`** — Windows ships a transparent proxy into a Linux twin
-  inside WSL2 (one store, one feature set).
-- **`kvm-microvm`** *(prototype)* — a real microVM with its own kernel via
-  Cloud Hypervisor: the tier that ends kernel-sharing. Boot benchmark vs
-  Docker (same static binary both sides): `bench/microvm`.
+  inside WSL2 (one store, one feature set); the twin then applies the
+  same Linux policy.
 - **`hvf-microvm`** — the macOS plan (Virtualization.framework), architecture
   only for now.
+
+Stacks (`myc up`, web stacks) run on namespaces by construction — their
+services reach each other over the host network or the pod's private one.
 
 Status, benchmark protocol and results, and the snapshot/restore findings
 live in [docs/isolation-engines.md](docs/isolation-engines.md).
