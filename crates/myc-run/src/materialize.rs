@@ -45,6 +45,11 @@ pub fn materialize(store: &Store, manifest: &Manifest, rootfs: &Path) -> Result<
         hardlinked: 0,
         copied: 0,
     };
+    // Directory modes are applied in a second pass, after every child is
+    // created: an image may ship a 0555 directory (Oracle's pki
+    // directory-hash does) whose entries must still be created inside —
+    // applying the mode eagerly makes every child creation fail EACCES.
+    let mut dir_modes: Vec<(std::path::PathBuf, u32)> = Vec::new();
 
     for entry in &manifest.entries {
         // Entry paths are normalized ('/x/y', no '..'), enforced at ingest
@@ -60,7 +65,7 @@ pub fn materialize(store: &Store, manifest: &Manifest, rootfs: &Path) -> Result<
                 if !dest.exists() {
                     fs::create_dir_all(&dest).map_err(|e| io_err(&dest, e))?;
                 }
-                set_mode(&dest, entry.mode)?;
+                dir_modes.push((dest.clone(), entry.mode));
                 stats.dirs += 1;
             }
             EntryKind::File => {
@@ -110,6 +115,12 @@ pub fn materialize(store: &Store, manifest: &Manifest, rootfs: &Path) -> Result<
             EntryKind::Fifo | EntryKind::CharDevice | EntryKind::BlockDevice => {}
         }
     }
+    // Final directory modes, deepest first: chmod only needs +x on the
+    // ancestors along the path, which the not-yet-final parent modes keep.
+    dir_modes.sort_by_key(|(p, _)| std::cmp::Reverse(p.components().count()));
+    for (dest, mode) in dir_modes {
+        set_mode(&dest, mode)?;
+    }
     Ok(stats)
 }
 
@@ -148,6 +159,76 @@ fn mode_differs_beyond_write(path: &Path, want: u32) -> Result<bool> {
 mod tests {
     use super::*;
     use myc_manifest::{Entry, RuntimeConfig, SCHEMA_VERSION};
+
+    #[test]
+    fn materialize_restricted_dir_with_children() {
+        // Real-world regression (mysql:latest, Oracle pki): the image ships
+        // /etc/pki/ca-trust/extracted/pem/directory-hash as 0555 with
+        // symlink children inside — eager mode application made every
+        // child creation fail with EACCES.
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("store")).unwrap();
+        let (hash, size) = store.put_blob(&mut &b"pem\n"[..]).unwrap();
+        let manifest = Manifest {
+            schema: SCHEMA_VERSION,
+            name: "t:1".into(),
+            origin: None,
+            os: "linux".into(),
+            arch: "amd64".into(),
+            created: "now".into(),
+            config: RuntimeConfig::default(),
+            entries: vec![
+                Entry {
+                    path: "/etc/pki/ca-trust/extracted/pem/directory-hash".into(),
+                    kind: EntryKind::Dir,
+                    mode: 0o555,
+                    uid: 0,
+                    gid: 0,
+                    blake3: None,
+                    size: 0,
+                    target: None,
+                    device: None,
+                },
+                Entry {
+                    path: "/etc/pki/ca-trust/extracted/pem/directory-hash/002c0b4f.0".into(),
+                    kind: EntryKind::Symlink,
+                    mode: 0o777,
+                    uid: 0,
+                    gid: 0,
+                    blake3: None,
+                    size: 0,
+                    target: Some("GlobalSign_Root_R46.pem".into()),
+                    device: None,
+                },
+                Entry {
+                    path: "/etc/pki/ca-trust/extracted/pem/directory-hash/GlobalSign_Root_R46.pem"
+                        .into(),
+                    kind: EntryKind::File,
+                    mode: 0o644,
+                    uid: 0,
+                    gid: 0,
+                    blake3: Some(hash),
+                    size,
+                    target: None,
+                    device: None,
+                },
+            ],
+        };
+        let rootfs = dir.path().join("rootfs");
+        materialize(&store, &manifest, &rootfs).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        let d = rootfs.join("etc/pki/ca-trust/extracted/pem/directory-hash");
+        assert_eq!(
+            fs::metadata(&d).unwrap().permissions().mode() & 0o7777,
+            0o555
+        );
+        let l = d.join("002c0b4f.0");
+        assert!(fs::symlink_metadata(&l).unwrap().file_type().is_symlink());
+        assert_eq!(
+            fs::read_link(&l).unwrap().to_str().unwrap(),
+            "GlobalSign_Root_R46.pem"
+        );
+    }
 
     #[test]
     fn materialize_hardlinks_and_dedups() {

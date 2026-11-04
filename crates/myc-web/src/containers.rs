@@ -1015,8 +1015,6 @@ const UID_LIMIT_PATTERNS: &[&str] = &[
     "setuid: operation not permitted",
     "su-exec:",
     "initdb: could not change permissions",
-    "operation not permitted",
-    "permission denied",
 ];
 
 /// Inspect the last few KiB of a failed container's log for known failure
@@ -1039,7 +1037,12 @@ fn failure_hint_from_log(log_path: &Path, port: Option<u16>) -> Option<String> {
              try again."
         ));
     }
-    if UID_LIMIT_PATTERNS.iter().any(|p| text.contains(p)) {
+    // Never diagnose uid limits from a host-side failure: "myc: error:"
+    // lines are Mycel's own (e.g. a materialize EACCES) — the app never
+    // ran, and its log is not evidence about user switching. The bare
+    // generic patterns ("permission denied" etc.) were removed for the
+    // same reason: they matched far too much.
+    if !text.contains("myc: error:") && UID_LIMIT_PATTERNS.iter().any(|p| text.contains(p)) {
         return Some(
             "This app tried to switch to its own internal user account, which \
              this rootless setup does not provide by default. Two easy fixes: \
