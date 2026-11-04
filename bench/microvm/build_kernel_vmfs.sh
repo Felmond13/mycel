@@ -231,6 +231,9 @@ make O="$OUT_BUILD" ARCH="$KARCH" -j"$JOBS" "$IMAGE_TARGET"
 
 mkdir -p "$ASSETS"
 cp "$OUT_BUILD/$IMAGE_PATH" "$ASSETS/$OUT"
+# Raw ELF beside the bzImage: Firecracker only loads uncompressed ELF
+# kernels (the kvm-microvm snapshot path publishes it as an asset).
+cp "$OUT_BUILD/vmlinux" "$ASSETS/$OUT.elf"
 UNAME_R=$(make O="$OUT_BUILD" ARCH="$KARCH" -s kernelrelease)
 # Contenu .version inchangé pour x86_64 (contrat historique) ; l'arch est
 # marquée dans le nom de fichier côté aarch64.

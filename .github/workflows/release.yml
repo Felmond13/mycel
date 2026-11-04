@@ -121,6 +121,7 @@ jobs:
         run: |
           cd bench/microvm/assets
           sha256sum vmlinux-vmfs > vmlinux-vmfs.sha256
+          sha256sum vmlinux-vmfs.elf > vmlinux-vmfs.elf.sha256
           sha256sum init-vm.cpio > init-vm.cpio.sha256
           cat > README-assets.txt <<'EOF'
           Mycel KVM microVM guest assets
@@ -148,6 +149,8 @@ jobs:
           files: |
             bench/microvm/assets/vmlinux-vmfs
             bench/microvm/assets/vmlinux-vmfs.sha256
+            bench/microvm/assets/vmlinux-vmfs.elf
+            bench/microvm/assets/vmlinux-vmfs.elf.sha256
             bench/microvm/assets/init-vm.cpio
             bench/microvm/assets/init-vm.cpio.sha256
             bench/microvm/assets/README-assets.txt
@@ -186,6 +189,7 @@ jobs:
         run: |
           cd bench/microvm/assets
           sha256sum vmlinux-vmfs-aarch64 > vmlinux-vmfs-aarch64.sha256
+          sha256sum vmlinux-vmfs-aarch64.elf > vmlinux-vmfs-aarch64.elf.sha256
           sha256sum init-vm-aarch64.cpio > init-vm-aarch64.cpio.sha256
           cat > README-assets-aarch64.txt <<'EOF'
           Mycel KVM microVM guest assets — aarch64
@@ -215,6 +219,8 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: |
+            bench/microvm/assets/vmlinux-vmfs-aarch64.elf
+            bench/microvm/assets/vmlinux-vmfs-aarch64.elf.sha256
             bench/microvm/assets/vmlinux-vmfs-aarch64
             bench/microvm/assets/vmlinux-vmfs-aarch64.sha256
             bench/microvm/assets/init-vm-aarch64.cpio
