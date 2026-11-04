@@ -24,3 +24,4 @@ bench/microvm/assets/
 bench/microvm/results/
 bench/image-compare/results/
 bench/store-modes/results/
+bench/snapshot-accel/.snapcache/

@@ -77,6 +77,13 @@ pub const DEFAULT_VM_INITRAMFS: &str = "/usr/local/share/mycel/init-vm.cpio";
 pub const DEFAULT_MKFS_EXT4: &str = "/usr/sbin/mkfs.ext4";
 /// iptables (nft backend is fine) — published ports only.
 pub const DEFAULT_IPTABLES: &str = "/usr/sbin/iptables";
+/// Firecracker (snapshot accelerator) — system location; auto-provisioned
+/// into the download cache when absent (see [`crate::firecracker`]).
+pub const DEFAULT_FC_BIN: &str = "/usr/local/bin/firecracker";
+/// Uncompressed kernel ELF for Firecracker (same build as
+/// [`DEFAULT_VM_KERNEL`]; system location, else the local kernel build
+/// tree, else the download cache).
+pub const DEFAULT_FC_KERNEL: &str = "/usr/local/share/mycel/vmlinux-vmfs.elf";
 
 /// Guest subnet of the microVM network, a /24: the bridge holds `<base>.1`
 /// and each VM leases `<base>.2`, `<base>.3`, … Override with
@@ -97,7 +104,7 @@ pub const GUEST_PORT: u16 = 8080;
 /// Guest memory size (override with `MYCEL_VM_MEM`, e.g. `1G`).
 pub const DEFAULT_VM_MEM: &str = "512M";
 /// Raw scratch disk carrying the exit code out of the guest.
-const SCRATCH_SIZE: u64 = 1024 * 1024;
+pub(crate) const SCRATCH_SIZE: u64 = 1024 * 1024;
 
 const STOP_TIMEOUT: Duration = Duration::from_secs(5);
 static VM_COUNTER: AtomicU32 = AtomicU32::new(0);
@@ -115,7 +122,7 @@ const ASSETS_REPO: &str = "Felmond13/mycel";
 /// Below these sizes an "asset" is certainly truncated or corrupt (the
 /// real kernel is ~4.5 MB, the real initramfs ~2.2 MB).
 const MIN_KERNEL_BYTES: u64 = 1024 * 1024;
-const MIN_INITRAMFS_BYTES: u64 = 64 * 1024;
+pub(crate) const MIN_INITRAMFS_BYTES: u64 = 64 * 1024;
 /// Generous budget for the ~7 MB of assets on a slow link.
 const ASSET_TIMEOUT: Duration = Duration::from_secs(600);
 const ASSET_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -123,7 +130,7 @@ const ASSET_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// Download cache for auto-provisioned assets (`MYCEL_VM_ASSETS_DIR` or
 /// `~/.mycel/vm-assets/`). The system dir (`/usr/local/share/mycel/`) is
 /// root-owned and stays the sysadmin's — or `install.sh --with-vm`'s — job.
-fn vm_assets_cache() -> PathBuf {
+pub(crate) fn vm_assets_cache() -> PathBuf {
     if let Ok(dir) = std::env::var("MYCEL_VM_ASSETS_DIR") {
         return PathBuf::from(dir);
     }
@@ -261,13 +268,19 @@ pub struct KvmMicroVm {
     pub mkfs_ext4: PathBuf,
     /// `iptables` (published ports).
     pub iptables: PathBuf,
+    /// Firecracker binary (snapshot accelerator —
+    /// [`crate::firecracker`]); auto-provisioned like the guest assets.
+    pub fc_bin: PathBuf,
+    /// Kernel ELF Firecracker boots (same build as `vm_kernel`; FC does
+    /// not load bzImages). `MYCEL_FC_KERNEL` overrides.
+    pub fc_kernel: PathBuf,
 }
 
 impl KvmMicroVm {
     /// Resolve engine paths from `MYCEL_CH_BIN`, `MYCEL_CH_REMOTE`,
     /// `MYCEL_KERNEL`, `MYCEL_VIRTIOFSD`, `MYCEL_VM_KERNEL`,
-    /// `MYCEL_VM_INITRAMFS`, `MYCEL_MKFS_EXT4`, `MYCEL_IPTABLES` or the
-    /// documented defaults.
+    /// `MYCEL_VM_INITRAMFS`, `MYCEL_MKFS_EXT4`, `MYCEL_IPTABLES`,
+    /// `MYCEL_FC_BIN`, `MYCEL_FC_KERNEL` or the documented defaults.
     pub fn from_env() -> Self {
         let pick = |var: &str, default: &str| {
             std::env::var(var)
@@ -283,6 +296,8 @@ impl KvmMicroVm {
             vm_initramfs: pick("MYCEL_VM_INITRAMFS", DEFAULT_VM_INITRAMFS),
             mkfs_ext4: pick("MYCEL_MKFS_EXT4", DEFAULT_MKFS_EXT4),
             iptables: pick("MYCEL_IPTABLES", DEFAULT_IPTABLES),
+            fc_bin: pick("MYCEL_FC_BIN", DEFAULT_FC_BIN),
+            fc_kernel: pick("MYCEL_FC_KERNEL", DEFAULT_FC_KERNEL),
         }
     }
 
@@ -291,7 +306,7 @@ impl KvmMicroVm {
     }
 
     /// `/dev/kvm` opened read-write proves both presence and permission.
-    fn kvm_usable() -> bool {
+    pub(crate) fn kvm_usable() -> bool {
         std::fs::OpenOptions::new()
             .read(true)
             .write(true)
@@ -320,8 +335,14 @@ impl KvmMicroVm {
     /// the expected system location first, the download cache second, a
     /// one-shot download from the GitHub release last (this build's tag,
     /// then `latest`). Downloads land in the cache — never in the
-    /// root-owned system dir. Both `run()` and `launch()` go through this.
-    fn resolve_vm_asset(&self, expected: &Path, asset: &str, min_bytes: u64) -> Result<PathBuf> {
+    /// root-owned system dir. Both `run()` and `launch()` go through this
+    /// (and the Firecracker snapshot path for the initramfs).
+    pub(crate) fn resolve_vm_asset(
+        &self,
+        expected: &Path,
+        asset: &str,
+        min_bytes: u64,
+    ) -> Result<PathBuf> {
         let cache = vm_assets_cache();
         match locate_vm_asset(expected, &cache, asset, min_bytes) {
             AssetSource::System(path) | AssetSource::Cache(path) => Ok(path),
@@ -558,26 +579,41 @@ impl Voie {
 
 /// One virtiofs share: the rootfs (`tag=mycroot`) or a bind mount.
 #[derive(Debug, Clone)]
-struct Share {
-    tag: String,
-    host_dir: PathBuf,
-    container_path: String,
-    read_only: bool,
+pub(crate) struct Share {
+    pub(crate) tag: String,
+    pub(crate) host_dir: PathBuf,
+    pub(crate) container_path: String,
+    pub(crate) read_only: bool,
 }
 
 /// Everything the guest needs to run the workload, serialized into the
-/// rootfs as `/myc/run.env` (+ `/myc/run.json` for humans).
+/// rootfs as `/myc/run.env` (+ `/myc/run.json` for humans) — or, on the
+/// Firecracker snapshot path, written on the scratch disk by the host.
 #[derive(Debug, Clone)]
-struct GuestSpec {
-    argv: Vec<String>,
-    env: Vec<String>,
-    workdir: Option<String>,
-    hostname: String,
-    binds: Vec<Share>,
+pub(crate) struct GuestSpec {
+    pub(crate) argv: Vec<String>,
+    pub(crate) env: Vec<String>,
+    pub(crate) workdir: Option<String>,
+    pub(crate) hostname: String,
+    pub(crate) binds: Vec<Share>,
     /// Which virtio-blk device carries the exit code out (`/dev/vda` on
     /// voie B where scratch is the only disk, `/dev/vdb` on voie A where
     /// vda is the read-only root image).
-    exit_dev: String,
+    pub(crate) exit_dev: String,
+}
+
+/// Guest environment, most general first (the guest exports in order, so
+/// the last assignment of a key wins): sane defaults, then the image's
+/// ENV, then -e. Without a PATH nothing from a manifest CMD like
+/// `redis-server` could be exec'd by the shell. Shared by both VMM paths.
+pub(crate) fn guest_env(manifest: &myc_manifest::Manifest, request: &RunRequest) -> Vec<String> {
+    let mut env: Vec<String> = vec![
+        "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".into(),
+        "HOME=/root".into(),
+    ];
+    env.extend(manifest.config.env.iter().cloned());
+    env.extend(request.env.iter().cloned());
+    env
 }
 
 /// Quote `s` so a POSIX shell reads back exactly this string when the
@@ -639,7 +675,7 @@ poweroff -f
 
 /// Generate `/myc/run.env` — shell-sourceable assignments; the guest reads
 /// THIS file (zero JSON parsing inside the VM).
-fn run_env_content(spec: &GuestSpec) -> String {
+pub(crate) fn run_env_content(spec: &GuestSpec) -> String {
     let mut out = format!("MYC_ARGC={}\n", spec.argv.len());
     for (i, a) in spec.argv.iter().enumerate() {
         out.push_str(&format!("MYC_ARG_{i}={}\n", sh_quote(a)));
@@ -723,7 +759,7 @@ fn parse_exit_code(bytes: &[u8]) -> Option<i32> {
 
 /// Recursive byte size of a directory tree (symlinks not followed) — used
 /// to size voie A's ext4 image.
-fn tree_size(path: &Path) -> u64 {
+pub(crate) fn tree_size(path: &Path) -> u64 {
     let mut total = 0;
     let mut stack = vec![path.to_path_buf()];
     while let Some(p) = stack.pop() {
@@ -743,7 +779,7 @@ fn tree_size(path: &Path) -> u64 {
 }
 
 /// Is this process running as root? (tap creation + iptables need it).
-fn is_root() -> bool {
+pub(crate) fn is_root() -> bool {
     std::fs::read_to_string("/proc/self/status")
         .ok()
         .and_then(|s| {
@@ -758,7 +794,7 @@ fn is_root() -> bool {
 /// chains. Self-healing on two measured failure modes (2026-11-04): a run
 /// killed with SIGKILL never runs [`VmRun::release`], and re-entering the
 /// publish path used to stack duplicate rules. Idempotent, best-effort.
-fn purge_tag_rules(tag: &str) {
+pub(crate) fn purge_tag_rules(tag: &str) {
     let needle = format!("--comment {tag}");
     let bin = iptables_bin();
     for table in ["nat", "filter"] {
@@ -791,13 +827,13 @@ fn purge_tag_rules(tag: &str) {
     }
 }
 
-fn iptables_bin() -> PathBuf {
+pub(crate) fn iptables_bin() -> PathBuf {
     std::env::var("MYCEL_IPTABLES")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from(DEFAULT_IPTABLES))
 }
 
-fn iptables_run(bin: &Path, args: &[String]) -> bool {
+pub(crate) fn iptables_run(bin: &Path, args: &[String]) -> bool {
     Command::new(bin)
         .args(args)
         .stdin(Stdio::null())
@@ -821,7 +857,7 @@ fn iptables_run(bin: &Path, args: &[String]) -> bool {
 // script curling .2 keep working without modification.
 
 /// Run `ip <args>` silently; true on success.
-fn ip_run(args: &[&str]) -> bool {
+pub(crate) fn ip_run(args: &[&str]) -> bool {
     Command::new("ip")
         .args(args)
         .stdin(Stdio::null())
@@ -843,7 +879,7 @@ fn dotted(ip: [u8; 4]) -> String {
 /// The subnet this process leases guests from: `MYCEL_VM_CIDR` or
 /// [`DEFAULT_VM_CIDR`].
 #[derive(Debug, Clone)]
-struct VmNet {
+pub(crate) struct VmNet {
     /// Network address, e.g. 192.168.77.0.
     base: [u8; 4],
     /// Bridge (= host) address, e.g. 192.168.77.1.
@@ -888,7 +924,7 @@ fn parse_cidr(cidr: &str) -> Result<VmNet> {
     })
 }
 
-fn vm_net() -> Result<VmNet> {
+pub(crate) fn vm_net() -> Result<VmNet> {
     parse_cidr(&std::env::var("MYCEL_VM_CIDR").unwrap_or_else(|_| DEFAULT_VM_CIDR.into()))
 }
 
@@ -947,7 +983,7 @@ fn subnet_conflict(net: &VmNet) -> Option<(String, String)> {
 /// like docker0) and make sure it holds the host address of the subnet.
 /// Refuses to touch anything while another interface already occupies the
 /// subnet — silently overlapping subnets route to the wrong device.
-fn ensure_bridge(net: &VmNet) -> Result<()> {
+pub(crate) fn ensure_bridge(net: &VmNet) -> Result<()> {
     if !is_root() {
         return Err(BackendError::Unavailable(
             "networked microVMs need root (bridge, taps, DNAT) — run myc under sudo \
@@ -985,19 +1021,19 @@ fn ensure_bridge(net: &VmNet) -> Result<()> {
 
 /// One guest slot on the bridge: sequential IP, matching tap and MAC.
 #[derive(Debug, Clone)]
-struct Lease {
+pub(crate) struct Lease {
     /// Host part of the guest IP, 2..=254 — names the tap and the rules.
-    n: u8,
+    pub(crate) n: u8,
     /// Guest IPv4 = `<base>.n`.
-    ip: [u8; 4],
+    pub(crate) ip: [u8; 4],
     /// Dotted guest IP.
-    ip_str: String,
+    pub(crate) ip_str: String,
     /// Host-side tap, created by the VMM and attached to the bridge.
-    tap: String,
+    pub(crate) tap: String,
     /// iptables comment tag (`-m comment --comment <tag>`), = tap name.
-    tag: String,
+    pub(crate) tag: String,
     /// Guest MAC, derived from the IP: `52:54:00:77:<oct3>:<oct4>`.
-    mac: String,
+    pub(crate) mac: String,
 }
 
 /// Deterministic per-lease MAC: locally administered 52:54:00 prefix, the
@@ -1018,7 +1054,7 @@ fn lease_registry(net: &VmNet) -> PathBuf {
     std::env::temp_dir().join(format!("myc-leases-{}", dotted(net.base)))
 }
 
-fn pid_alive(pid: u32) -> bool {
+pub(crate) fn pid_alive(pid: u32) -> bool {
     Path::new("/proc").join(pid.to_string()).exists()
 }
 
@@ -1109,7 +1145,7 @@ fn claim_first_free(
 }
 
 /// Allocate the first free lease for this VM.
-fn allocate_lease(net: &VmNet, state_dir: &Path) -> Result<Lease> {
+pub(crate) fn allocate_lease(net: &VmNet, state_dir: &Path) -> Result<Lease> {
     let mut live = LIVE_LEASES.lock().unwrap_or_else(|e| e.into_inner());
     claim_first_free(
         &lease_registry(net),
@@ -1121,7 +1157,7 @@ fn allocate_lease(net: &VmNet, state_dir: &Path) -> Result<Lease> {
 }
 
 /// Release a lease: registry claim, state-dir marker, in-memory set.
-fn release_lease(net: &VmNet, lease: &Lease, state_dir: &Path) {
+pub(crate) fn release_lease(net: &VmNet, lease: &Lease, state_dir: &Path) {
     release_lease_in(&lease_registry(net), lease, state_dir);
     if let Ok(mut live) = LIVE_LEASES.lock() {
         live.remove(&lease.n);
@@ -1141,7 +1177,7 @@ fn release_lease_in(reg: &Path, lease: &Lease, state_dir: &Path) {
 /// entry; proof: docs/benchmarks/microvm-tail-analysis.md). Permanent
 /// entries work before the VM even boots; the twin entry on the tap keeps
 /// the pre-bridge behavior. Idempotent.
-fn seed_guest_arp(lease: &Lease) {
+pub(crate) fn seed_guest_arp(lease: &Lease) {
     for dev in [BRIDGE_NAME, lease.tap.as_str()] {
         let _ = ip_run(&[
             "neigh",
@@ -1174,7 +1210,7 @@ fn attach_tap(lease: &Lease) -> bool {
 /// Tear the host side of one lease down (idempotent): the ARP entries on
 /// bridge and tap, then the tap itself (normally already gone with the
 /// VMM). The bridge persists between runs — docker0-style, by design.
-fn detach_tap(lease: &Lease) {
+pub(crate) fn detach_tap(lease: &Lease) {
     for dev in [BRIDGE_NAME, lease.tap.as_str()] {
         let _ = ip_run(&["neigh", "del", &lease.ip_str, "dev", dev]);
     }
@@ -1198,7 +1234,12 @@ fn detach_tap(lease: &Lease) {
 /// `127.0.0.1:<host>` is served by the userland [`crate::portproxy`]
 /// relay instead, exactly like docker-proxy. Every rule carries the lease
 /// tag (`myc-<n>`) so cleanup deletes exactly ours.
-fn dnat_rules(tag: &str, host_port: u16, guest_port: u16, guest_ip: &str) -> Vec<Vec<String>> {
+pub(crate) fn dnat_rules(
+    tag: &str,
+    host_port: u16,
+    guest_port: u16,
+    guest_ip: &str,
+) -> Vec<Vec<String>> {
     let build =
         |op: &str, table: &str, chain: &str, match_args: Vec<String>, jump_args: Vec<String>| {
             let mut v = vec![
@@ -1446,48 +1487,75 @@ fn spawn_virtiofsd(
 /// (ONLCR), which would pollute piped output with stray CR. The stream is
 /// therefore normalized to Unix line endings — a CR is dropped only when
 /// directly followed by LF, and a pending CR carries across poll chunks.
-fn spawn_console_tailer(path: PathBuf, stop: Arc<AtomicBool>) -> thread::JoinHandle<()> {
+///
+/// Protocol lines of the snapshot-path guest agent (and busybox's reboot
+/// banner) are DROPPED: they are host-side debug markers, not workload
+/// output, and would break the stdout contract (`myc run … -- echo hello`
+/// must print exactly `hello`). Everything else passes through untouched.
+pub(crate) fn spawn_console_tailer(path: PathBuf, stop: Arc<AtomicBool>) -> thread::JoinHandle<()> {
     thread::spawn(move || {
         let mut offset: u64 = 0;
         let mut pending_cr = false;
-        let pump = |offset: &mut u64, pending_cr: &mut bool| {
+        let mut line = Vec::new();
+        let emit = |line: &mut Vec<u8>| {
+            if console_line_is_protocol(line) {
+                line.clear();
+                return;
+            }
+            line.push(b'\n');
+            let mut stdout = std::io::stdout().lock();
+            let _ = stdout.write_all(line);
+            let _ = stdout.flush();
+            line.clear();
+        };
+        let pump = |offset: &mut u64, pending_cr: &mut bool, line: &mut Vec<u8>| {
             if let Ok(mut f) = std::fs::File::open(&path) {
                 if f.seek(SeekFrom::Start(*offset)).is_ok() {
                     let mut buf = Vec::new();
                     if f.read_to_end(&mut buf).is_ok() && !buf.is_empty() {
                         *offset += buf.len() as u64;
-                        let mut out = Vec::with_capacity(buf.len());
                         for &b in &buf {
                             if *pending_cr {
                                 *pending_cr = false;
                                 if b != b'\n' {
-                                    out.push(b'\r'); // literal CR, not CRLF
+                                    line.push(b'\r'); // literal CR, not CRLF
                                 }
                             }
                             if b == b'\r' {
                                 *pending_cr = true;
+                            } else if b == b'\n' {
+                                emit(line);
                             } else {
-                                out.push(b);
+                                line.push(b);
                             }
                         }
-                        let mut stdout = std::io::stdout().lock();
-                        let _ = stdout.write_all(&out);
-                        let _ = stdout.flush();
                     }
                 }
             }
         };
         while !stop.load(Ordering::SeqCst) {
-            pump(&mut offset, &mut pending_cr);
+            pump(&mut offset, &mut pending_cr, &mut line);
             thread::sleep(Duration::from_millis(10));
         }
-        pump(&mut offset, &mut pending_cr); // final drain
+        pump(&mut offset, &mut pending_cr, &mut line); // final drain
         if pending_cr {
-            let mut stdout = std::io::stdout().lock();
-            let _ = stdout.write_all(b"\r");
-            let _ = stdout.flush();
+            line.push(b'\r');
+        }
+        if !line.is_empty() {
+            emit(&mut line);
         }
     })
+}
+
+/// True for the snapshot agent's protocol lines and the busybox reboot
+/// banner (see [`spawn_console_tailer`]).
+fn console_line_is_protocol(line: &[u8]) -> bool {
+    let text = String::from_utf8_lossy(line);
+    let text = text.trim_end_matches('\r');
+    text == "reboot: Restarting system"
+        || text == "myc-agent: ready"
+        || text == "myc-agent: timeout"
+        || text.starts_with("myc-agent: running: ")
 }
 
 impl ExecBackend for KvmMicroVm {
@@ -1504,6 +1572,13 @@ impl ExecBackend for KvmMicroVm {
         let virtiofsd = Self::file_exists(&self.virtiofsd);
         let mkfs = Self::file_exists(&self.mkfs_ext4);
         let ipt = Self::file_exists(&self.iptables);
+        // Snapshot accelerator pieces — presence only, no download here
+        // (mirrors the kernel/initramfs rows: auto-provisioned at first use).
+        let cache = vm_assets_cache();
+        let fc_bin_ok =
+            Self::file_exists(&self.fc_bin) || Self::file_exists(&cache.join("firecracker"));
+        let fc_kernel_ok = Self::file_exists(&self.fc_kernel)
+            || Self::file_exists(&cache.join(crate::firecracker::FC_KERNEL_ASSET));
         // The guest subnet must not collide with any existing interface
         // (docker0, eth0, …) — the bridge refuses to operate in that case.
         let subnet_check = match vm_net() {
@@ -1596,6 +1671,20 @@ impl ExecBackend for KvmMicroVm {
                 ),
                 fix: (!ipt).then(|| "sudo apt install iptables (only needed for -p)".into()),
             },
+            BackendCheck {
+                name: "firecracker".into(),
+                ok: fc_bin_ok && fc_kernel_ok,
+                detail: format!(
+                    "{} + kernel ELF — snapshot accelerator (repeated runs restore a \
+                     paused microVM instead of booting; disable with MYCEL_SNAPSHOT_CACHE=0)",
+                    self.fc_bin.display()
+                ),
+                fix: (!(fc_bin_ok && fc_kernel_ok)).then(|| {
+                    "auto-downloaded/copied on the first run; or install firecracker \
+                     v1.17.0 and build the vmfs kernel (bench/microvm/build_kernel_vmfs.sh)"
+                        .into()
+                }),
+            },
             subnet_check,
         ];
         BackendReport {
@@ -1662,6 +1751,24 @@ impl ExecBackend for KvmMicroVm {
             ));
         }
 
+        // --- Firecracker snapshot accelerator (automatic when available) --
+        // Repeated runs of the same environment restore a paused microVM
+        // snapshot instead of booting a kernel (see
+        // docs/benchmarks/snapshot-accelerator.md). Any missing piece falls
+        // back to the Cloud Hypervisor path below with one log line.
+        if !request.no_snapshot_cache {
+            match crate::firecracker::snapshot_run(
+                self, store_root, request, &id, &manifest, &command,
+            )? {
+                crate::firecracker::SnapshotOutcome::Ran(code) => return Ok(code),
+                crate::firecracker::SnapshotOutcome::Unavailable(why) => {
+                    eprintln!(
+                        "[myc-vm] snapshot path not used ({why}) — cloud-hypervisor path instead"
+                    );
+                }
+            }
+        }
+
         // --- plan: binds and published ports ------------------------------
         let cwd = std::env::current_dir()?;
         let mut binds = Vec::new();
@@ -1706,17 +1813,11 @@ impl ExecBackend for KvmMicroVm {
 
         // Environment, most general first (the guest exports in order, so
         // the last assignment of a key wins): sane defaults, then the
-        // image's ENV, then -e. Without a PATH nothing from a manifest CMD
-        // like `redis-server` could be exec'd by the shell.
-        let mut env: Vec<String> = vec![
-            "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".into(),
-            "HOME=/root".into(),
-        ];
-        env.extend(manifest.config.env.iter().cloned());
-        env.extend(request.env.iter().cloned());
+        // image's ENV, then -e (shared with the snapshot path — see
+        // [`guest_env`]).
         let spec = GuestSpec {
             argv: command,
-            env,
+            env: guest_env(&manifest, request),
             workdir: request
                 .workdir
                 .clone()
@@ -2435,6 +2536,8 @@ mod tests {
             vm_initramfs: PathBuf::new(),
             mkfs_ext4: PathBuf::new(),
             iptables: PathBuf::new(),
+            fc_bin: PathBuf::new(),
+            fc_kernel: PathBuf::new(),
         };
         assert!(Voie::select(&engine).is_err());
     }
@@ -2453,6 +2556,22 @@ mod tests {
             "init-guest is not valid shell: {}",
             String::from_utf8_lossy(&out.stderr)
         );
+    }
+
+    #[test]
+    fn console_protocol_lines_are_filtered_but_not_workload_output() {
+        // Agent protocol lines and the busybox reboot banner never reach
+        // myc's stdout (the stdout contract is the workload's output only).
+        assert!(console_line_is_protocol(b"myc-agent: ready"));
+        assert!(console_line_is_protocol(b"myc-agent: timeout"));
+        assert!(console_line_is_protocol(b"myc-agent: running: echo hi"));
+        assert!(console_line_is_protocol(b"reboot: Restarting system"));
+        assert!(console_line_is_protocol(b"myc-agent: ready\r"));
+        // Anything a workload might print passes through untouched.
+        assert!(!console_line_is_protocol(b"hello"));
+        assert!(!console_line_is_protocol(b"myc-agent: manual output"));
+        assert!(!console_line_is_protocol(b""));
+        assert!(!console_line_is_protocol(b"myc-agentX"));
     }
 
     #[test]
@@ -2528,6 +2647,8 @@ mod tests {
             vm_initramfs: PathBuf::new(),
             mkfs_ext4: PathBuf::new(),
             iptables: PathBuf::new(),
+            fc_bin: PathBuf::new(),
+            fc_kernel: PathBuf::new(),
         };
         let dir = tempfile::tempdir().unwrap();
         let kernel = dir.path().join("vmlinux-vmfs");

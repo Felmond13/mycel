@@ -11,6 +11,10 @@
 //! strategies: `probe()` reports whether the backend can work here (with an
 //! actionable fix when it cannot), `run()` executes one container.
 
+/// Firecracker snapshot accelerator for the kvm-microvm engine (used by
+/// [`kvm`]; reached through kvm's run path).
+#[cfg(target_os = "linux")]
+pub(crate) mod firecracker;
 #[cfg(target_os = "linux")]
 pub mod kvm;
 #[cfg(target_os = "linux")]
@@ -199,6 +203,10 @@ pub struct RunRequest {
     /// means "publish the manifest's exposed ports" for VM backends (a VM
     /// cannot literally share the host network namespace).
     pub publish: Vec<(u16, u16)>,
+    /// Skip the Firecracker snapshot cache (`--no-snapshot-cache`): every
+    /// kvm-microvm run cold-boots through Cloud Hypervisor. Ignored by
+    /// non-VM backends.
+    pub no_snapshot_cache: bool,
 }
 
 /// A strategy for executing containers on this machine.
