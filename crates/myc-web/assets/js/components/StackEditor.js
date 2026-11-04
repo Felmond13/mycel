@@ -7,7 +7,7 @@ import { toast } from "../ui.js";
 import { CATALOG } from "../catalog.js";
 
 function emptyService() {
-  return { name: "", image: "", command: "", env: [], depends_on: [], workdir: "" };
+  return { name: "", image: "", command: "", env: [], depends_on: [], workdir: "", engine: "" };
 }
 
 export default {
@@ -18,7 +18,7 @@ export default {
       loaded: false,
       advanced: false,
       toml: "",
-      services: [],   // {name, image, command, env: [[k,v]], depends_on: [], workdir}
+      services: [],   // {name, image, command, env: [[k,v]], depends_on: [], workdir, engine}
       saveHint: "",
       saving: false,
     };
@@ -42,6 +42,7 @@ export default {
         env: s.env.map(kv => { const i = kv.indexOf("="); return [kv.slice(0, i), kv.slice(i + 1)]; }),
         depends_on: s.depends_on.slice(),
         workdir: s.workdir || "",
+        engine: s.engine || "", // isolation engine per service
       }));
     } catch (_) {
       // brand-new stack: start with one empty service
@@ -75,6 +76,7 @@ export default {
         if (env.length) out += "env = [" + env.map(e => JSON.stringify(e)).join(", ") + "]\n";
         if (s.depends_on.length) out += "depends_on = [" + s.depends_on.map(d => JSON.stringify(d)).join(", ") + "]\n";
         if (s.workdir.trim()) out += "workdir = " + JSON.stringify(s.workdir.trim()) + "\n";
+        if (s.engine) out += "engine = " + JSON.stringify(s.engine) + "\n";
       }
       return out;
     },
@@ -95,6 +97,7 @@ export default {
               env: s.env.filter(kv => kv[0].trim()).map(kv => kv[0].trim() + "=" + kv[1]),
               depends_on: s.depends_on,
               workdir: s.workdir.trim() || null,
+              engine: s.engine || null,
             };
           }
           await api.put("/api/stacks/" + encodeURIComponent(this.arg), { services });
@@ -143,6 +146,10 @@ export default {
           <div class="field">
             <span class="label">Command — optional, leave empty for the app's default</span>
             <input type="text" v-model="s.command" spellcheck="false" style="width:100%" class="mono">
+          </div>
+          <div class="field">
+            <span class="label">Isolation</span>
+            <engine-picker v-model="s.engine"></engine-picker>
           </div>
           <div class="field">
             <span class="label">Settings (environment variables)</span>

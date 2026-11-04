@@ -7,6 +7,7 @@ import { api } from "./api.js";
 import { canonicalImage } from "./format.js";
 import { recordSamples } from "./metrics.js";
 import { toast, confirmDialog } from "./ui.js";
+import { loadEngines } from "./engines.js";
 
 export const S = reactive({
   now: Date.now() / 1000,   // ticking clock for uptime displays
@@ -40,6 +41,7 @@ export async function refreshStats() {
 export function startPolling() {
   refreshState();
   refreshStats();
+  loadEngines(); // one-shot: isolation engine catalog (start dialog, stack editor)
   setInterval(() => { if (!document.hidden) refreshState(); }, 2500);
   setInterval(() => { if (!document.hidden) refreshStats(); }, 10000);
   setInterval(() => { S.now = Date.now() / 1000; }, 1000);

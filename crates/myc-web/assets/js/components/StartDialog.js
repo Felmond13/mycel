@@ -1,7 +1,11 @@
 // "Customize & start" modal for a catalog app: the one-click defaults
 // (name, port, env) prefilled and editable for power users. Emits
-// `start` with {name, port, env, keep_data, data_folder, isolate, ports}
-// overrides, or `close`.
+// `start` with {engine, name, port, env, keep_data, data_folder,
+// isolate, ports} overrides, or `close`.
+//
+// The Isolation section picks the run engine: "Rapide" (shared kernel)
+// or "Isolé — microVM" (dedicated kernel). Availability comes from
+// GET /api/engines; on an older server only the quick mode is offered.
 //
 // The Data section only appears for apps that declare data directories
 // (redis, postgres, …): a "keep my data" toggle (ON by default — the
@@ -31,6 +35,7 @@ export default {
       keepData: true,
       useFolder: false,
       dataFolder: "",
+      engine: "",         // isolation engine ("native-namespaces" | "kvm-microvm")
       isolate: false,     // own private network (server: isolate_network)
       isoAvailable: null, // null while loading /api/capabilities
       netPorts: [],       // [{container, host}] — host is an editable string
@@ -82,6 +87,7 @@ export default {
         .map(r => r.k.trim() + "=" + r.v);
       const folder = this.keepData && this.useFolder ? this.dataFolder.trim() : "";
       this.$emit("start", {
+        engine: this.engine || null,
         name: this.name.trim() || this.entry.id,
         port: this.portNum,
         env,
@@ -107,6 +113,10 @@ export default {
       <input type="text" v-model="port" placeholder="none" style="width:140px;margin-bottom:4px" spellcheck="false">
       <div v-if="portBad" style="color:var(--red);font-size:12px;margin-bottom:10px">must be a number between 1 and 65535</div>
       <div v-else style="height:10px"></div>
+
+      <span class="label">Isolation</span>
+      <engine-picker v-model="engine"></engine-picker>
+      <div style="height:14px"></div>
 
       <template v-if="volumes.length">
         <span class="label">Data</span>

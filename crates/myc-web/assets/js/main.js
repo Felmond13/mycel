@@ -21,6 +21,7 @@ import RefAvatar from "./components/RefAvatar.js";
 import RefName from "./components/RefName.js";
 import Sparkline from "./components/Sparkline.js";
 import ContainerExpansion from "./components/ContainerExpansion.js";
+import EnginePicker from "./components/EnginePicker.js";
 import StartDialog from "./components/StartDialog.js";
 import ShareDialog from "./components/ShareDialog.js";
 import DeployDialog from "./components/DeployDialog.js";
@@ -38,6 +39,9 @@ import IngestPage from "./components/IngestPage.js";
 import DiffPage from "./components/DiffPage.js";
 import SearchPage from "./components/SearchPage.js";
 import DoctorPage from "./components/DoctorPage.js";
+import SnapshotsPage from "./components/SnapshotsPage.js";
+import PerformancePage from "./components/PerformancePage.js"; // wave 2 — stub
+import GettingStartedPage from "./components/GettingStartedPage.js"; // wave 2 — stub
 
 const app = createApp(AppShell);
 
@@ -56,6 +60,7 @@ app.component("ref-avatar", RefAvatar);
 app.component("ref-name", RefName);
 app.component("spark-line", Sparkline);
 app.component("container-expansion", ContainerExpansion);
+app.component("engine-picker", EnginePicker);
 app.component("start-dialog", StartDialog);
 app.component("share-dialog", ShareDialog);
 app.component("deploy-dialog", DeployDialog);
@@ -73,6 +78,9 @@ app.component("ingest-page", IngestPage);
 app.component("diff-page", DiffPage);
 app.component("search-page", SearchPage);
 app.component("doctor-page", DoctorPage);
+app.component("snapshots-page", SnapshotsPage);
+app.component("performance-page", PerformancePage);
+app.component("getting-started-page", GettingStartedPage);
 
 startPolling();
 startRouter();

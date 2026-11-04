@@ -48,11 +48,19 @@ export default {
       <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M8 2 14 5 8 8 2 5z"/><path d="M2 8.5 8 11.5 14 8.5"/><path d="M2 11.5 8 14.5 14 11.5"/></svg>
       <span class="nav-text">Stacks</span>
     </a>
+    <a class="nav-item" :class="{ active: active === 'started' }" href="#started">
+      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M4 14V2.5"/><path d="M4 3h8.5L10.5 5.5 12.5 8H4"/></svg>
+      <span class="nav-text">Premiers pas</span>
+    </a>
 
     <div class="nav-label">Advanced</div>
     <a class="nav-item" :class="{ active: active === 'store' }" href="#store">
       <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><ellipse cx="8" cy="4" rx="5.5" ry="2.2"/><path d="M2.5 4v8c0 1.2 2.5 2.2 5.5 2.2s5.5-1 5.5-2.2V4"/><path d="M2.5 8c0 1.2 2.5 2.2 5.5 2.2s5.5-1 5.5-2.2"/></svg>
       <span class="nav-text">Store</span>
+    </a>
+    <a class="nav-item" :class="{ active: active === 'snapshots' }" href="#snapshots">
+      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M5.5 4.5 6.7 3h2.6l1.2 1.5H13a1 1 0 0 1 1 1V12a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V5.5a1 1 0 0 1 1-1h2.5z"/><circle cx="8" cy="8.5" r="2.4"/></svg>
+      <span class="nav-text">Snapshots</span>
     </a>
     <a class="nav-item" :class="{ active: active === 'diff' }" href="#diff">
       <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="4.5" cy="4" r="2"/><circle cx="4.5" cy="12" r="2"/><circle cx="11.5" cy="8" r="2"/><path d="M4.5 6v4M6.3 4.8 9.8 7M6.3 11.2 9.8 9"/></svg>
@@ -61,6 +69,10 @@ export default {
     <a class="nav-item" :class="{ active: active === 'search' }" href="#search">
       <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="7" cy="7" r="4.5"/><path d="M10.5 10.5 14 14"/></svg>
       <span class="nav-text">Find a file</span>
+    </a>
+    <a class="nav-item" :class="{ active: active === 'performance' }" href="#performance">
+      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2.6 12.5a5.4 5.4 0 1 1 10.8 0"/><path d="M8 12.5 10.8 8"/><circle cx="8" cy="12.5" r="1.1" fill="currentColor" stroke="none"/></svg>
+      <span class="nav-text">Performance</span>
     </a>
     <a class="nav-item" :class="{ active: active === 'doctor' }" href="#doctor">
       <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M8 14s-5.5-3.2-5.5-7A3.2 3.2 0 0 1 8 4.6 3.2 3.2 0 0 1 13.5 7c0 3.8-5.5 7-5.5 7Z"/><path d="M4.5 8h2l1-1.8 1.2 3 1-1.2h1.8"/></svg>

@@ -8,6 +8,7 @@ import { toast, confirmDialog, openLogs } from "../ui.js";
 import { fmtDur, fmtBytes } from "../format.js";
 import { totals, fmtCpu } from "../metrics.js";
 import { route } from "../router.js";
+import { KVM } from "../engines.js";
 
 export default {
   name: "ContainersPage",
@@ -23,6 +24,8 @@ export default {
   },
   methods: {
     fmtBytes, fmtCpu,
+    // Started through the microVM engine → dedicated-kernel "VM" badge.
+    isVm(c) { return c.engine === KVM; },
     dotKind(c) {
       if (c.running) return "green";
       // A stop the user asked for is a success, whatever the exit code
@@ -99,6 +102,11 @@ export default {
         <template v-for="c in containers" :key="c.id">
           <div class="app-row" :class="{ open: expanded === c.id }" @click="toggle(c)">
             <status-dot :kind="dotKind(c)" :live="c.running"></status-dot>
+            <span v-if="isVm(c)" class="vm-badge" title="noyau dédié">
+              <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6">
+                <path d="M8 2 12.8 3.8v3.9c0 2.9-2.2 5.1-4.8 6-2.6-.9-4.8-3.1-4.8-6V3.8L8 2z"/>
+              </svg>VM
+            </span>
             <ref-avatar :reference="c.reference" size="30"></ref-avatar>
             <div class="info">
               <div class="nm">

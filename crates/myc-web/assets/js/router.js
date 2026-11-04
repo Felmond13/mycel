@@ -18,6 +18,9 @@ export const PAGES = {
   diff: "diff-page",
   search: "search-page",
   doctor: "doctor-page",
+  snapshots: "snapshots-page",
+  performance: "performance-page", // wave 2 — stub for now
+  started: "getting-started-page", // wave 2 — stub for now
 };
 
 /** Sidebar highlight: detail pages light up their parent section. */

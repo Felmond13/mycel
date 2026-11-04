@@ -6,6 +6,7 @@ import { api } from "../api.js";
 import { toast, openLogs } from "../ui.js";
 import { fmtDur } from "../format.js";
 import { CATALOG } from "../catalog.js";
+import { ENGINES } from "../engines.js";
 
 export default {
   name: "AppsPage",
@@ -71,6 +72,10 @@ export default {
           // with port_note + the real ports.
           isolate_network: custom ? !!custom.isolate : false,
           ports: custom ? custom.ports || [] : [],
+          // Isolation engine for this container ("native-namespaces" |
+          // "kvm-microvm"); the Customize dialog picks it, one-click
+          // uses the server's default (quick when unknown).
+          engine: custom ? (custom.engine || null) : ENGINES.default,
         });
         delete S.appUi[entry.id];
         refreshState();
