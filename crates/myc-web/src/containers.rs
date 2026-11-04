@@ -90,15 +90,18 @@ pub struct ContainerSpec {
     /// valid across holder restarts.
     #[serde(default)]
     pub pod: bool,
-    /// Execution engine label (`native-namespaces`, or `kvm-microvm` for a
-    /// real microVM with its own kernel — passed to `myc run --engine`).
-    /// Empty means the default (native).
+    /// Execution engine label passed to `myc run --engine`: empty (or
+    /// `auto`) = the automatic choice — the same policy the CLI applies
+    /// (strongest *complete* engine this request can carry: kvm-microvm
+    /// when READY, native namespaces otherwise); explicit labels force
+    /// one. The resolved engine is recorded on the container state and
+    /// reported by the API.
     #[serde(default)]
     pub engine: String,
 }
 
-/// The engine label reported over the API — the spec stores an empty
-/// string for the default, callers always see an explicit name.
+/// The engine label reported over the API when no explicit one was stored
+/// (pre-auto records: the empty value always meant native namespaces).
 fn default_engine_label(engine: &str) -> &str {
     if engine.is_empty() {
         "native-namespaces"
@@ -108,20 +111,60 @@ fn default_engine_label(engine: &str) -> &str {
 }
 
 impl ContainerSpec {
-    /// Engine executing this container (`native-namespaces` or
-    /// `kvm-microvm`); an empty stored value means the native default.
-    pub fn engine_label(&self) -> &str {
-        default_engine_label(&self.engine)
+    /// True when the spec leaves the engine to the automatic policy.
+    fn wants_auto(&self) -> bool {
+        self.engine.is_empty() || self.engine == "auto"
     }
+}
 
-    /// True when this container runs inside a real microVM.
-    pub fn is_microvm(&self) -> bool {
-        self.engine == "kvm-microvm"
+/// Resolve the engine of one web container: an explicit choice passes
+/// through; `auto` applies the SAME policy as `myc run` on the terminal
+/// (`myc_backend::decide_auto_engine` — one function, both entry points).
+/// Returns the effective label plus the one-line note appended to the
+/// container log for automatic choices (the CLI prints it on stderr).
+///
+/// Web-specific inputs: pod services join namespaces (`--join-net`);
+/// `isolate_network` is the pasta feature; the web attaches no terminal so
+/// runs are never interactive; the per-container run dir is a *consequence*
+/// of a native resolution, not an input — the microVM manages its own
+/// working directory.
+fn resolve_engine(
+    spec: &ContainerSpec,
+    kvm_complete: bool,
+    is_root: bool,
+    image_exposes_ports: bool,
+) -> (&'static str, Option<String>) {
+    if spec.engine == "kvm-microvm" {
+        return ("kvm-microvm", None);
+    }
+    if !spec.wants_auto() {
+        return ("native-namespaces", None);
+    }
+    let inputs = myc_backend::AutoEngineInputs {
+        join_net: spec.pod,
+        run_dir: false,
+        interactive: false,
+        net_isolated: spec.isolated_network,
+        publishes_ports: !spec.ports.is_empty() || image_exposes_ports,
+        is_root,
+    };
+    match myc_backend::decide_auto_engine(kvm_complete, inputs) {
+        myc_backend::EngineDecision::KvmMicroVm => (
+            "kvm-microvm",
+            Some("engine: kvm-microvm (auto; strongest available)".to_string()),
+        ),
+        myc_backend::EngineDecision::NativeNamespaces { why } => (
+            "native-namespaces",
+            why.map(|why| format!("engine: native-namespaces (auto; {why})")),
+        ),
     }
 }
 
 struct ContainerState {
     spec: ContainerSpec,
+    /// Engine actually executing this container, resolved at start time
+    /// (explicit choice or the auto policy — see [`resolve_engine`]).
+    engine: String,
     pid: i32,
     /// Kernel start time of `pid` (`/proc/<pid>/stat` field 22), recorded at
     /// spawn. Together with the pid it identifies the process across UI
@@ -163,7 +206,7 @@ impl ContainerState {
             "name": self.spec.name,
             "reference": self.spec.reference,
             "manifest_id": self.spec.manifest_id,
-            "engine": self.spec.engine_label(),
+            "engine": self.engine,
             "command": self.spec.command,
             "env": self.spec.env,
             "workdir": self.spec.workdir,
@@ -243,6 +286,10 @@ type Registry = Arc<Mutex<HashMap<String, ContainerState>>>;
 struct PersistedContainer {
     id: String,
     spec: ContainerSpec,
+    /// Engine the container was started with (empty for pre-auto records
+    /// — reported as the spec's effective label).
+    #[serde(default)]
+    engine: String,
     pid: i32,
     #[serde(default)]
     starttime: u64,
@@ -267,6 +314,7 @@ fn persist_registry(containers: &Registry, path: &Path) {
             .map(|(id, s)| PersistedContainer {
                 id: id.clone(),
                 spec: s.spec.clone(),
+                engine: s.engine.clone(),
                 pid: s.pid,
                 starttime: s.starttime,
                 started_at: s.started_at,
@@ -343,6 +391,11 @@ impl Manager {
                 let log_path = self.log_dir.join(format!("{}.log", r.id));
                 let run_dir = self.run_root.join(&r.id);
                 let mut state = ContainerState {
+                    engine: if r.engine.is_empty() {
+                        default_engine_label(&r.spec.engine).to_string()
+                    } else {
+                        r.engine
+                    },
                     spec: r.spec,
                     pid: r.pid,
                     starttime: r.starttime,
@@ -432,22 +485,48 @@ impl Manager {
         let log_path = self.log_dir.join(format!("{id}.log"));
         let run_dir = self.run_root.join(&id);
 
-        let log_file = std::fs::File::create(&log_path)
+        // Engine: the spec's explicit choice, or the SAME automatic policy
+        // as `myc run` on the terminal (one shared decision function —
+        // myc_backend::decide_auto_engine). The resolution drives the
+        // flags: the microVM manages its own working directory (no
+        // --run-dir), native runs materialize into our caller-owned dir.
+        // Ports the image exposes matter for the policy (publishing them
+        // on the microVM needs a root myc).
+        let image_exposes_ports = myc_store::Store::open(&self.store_root)
+            .ok()
+            .and_then(|s| s.get_manifest(&spec.manifest_id).ok())
+            .map(|m| !m.config.exposed_ports.is_empty())
+            .unwrap_or(false);
+        let (engine, engine_note) = resolve_engine(
+            &spec,
+            myc_backend::kvm_engine_complete(),
+            myc_backend::is_root(),
+            image_exposes_ports,
+        );
+        let is_microvm = engine == "kvm-microvm";
+
+        let mut log_file = std::fs::File::create(&log_path)
             .map_err(|e| format!("cannot create log file {}: {e}", log_path.display()))?;
+        // The engine note must share THIS handle: a separate append-mode
+        // handle (append_log_note) would leave the drain threads writing
+        // through this one from position 0, overwriting the note's first
+        // bytes with the child's first output.
+        if let Some(note) = &engine_note {
+            let _ = writeln!(log_file, "\n{note}");
+        }
 
         let mut cmd = Command::new(&self.exe);
         cmd.arg("--store")
             .arg(&self.store_root)
             .arg("run")
             .arg("--hostname")
-            .arg(&spec.name);
-        // The kvm-microvm engine manages its own working directory and
-        // refuses --run-dir (a VM rootfs is not a host dir to clean up);
-        // every other flag keeps the native semantics.
-        if !spec.is_microvm() {
+            .arg(&spec.name)
+            // Explicit on purpose: the manager already made the choice, the
+            // child must not re-decide (and re-probe) under our feet.
+            .arg("--engine")
+            .arg(engine);
+        if !is_microvm {
             cmd.arg("--run-dir").arg(&run_dir);
-        } else {
-            cmd.arg("--engine").arg("kvm-microvm");
         }
         for kv in &spec.env {
             cmd.arg("-e").arg(kv);
@@ -518,6 +597,7 @@ impl Manager {
             id.clone(),
             ContainerState {
                 spec,
+                engine: engine.to_string(),
                 pid,
                 starttime,
                 started_at: now_secs(),
@@ -1108,7 +1188,11 @@ mod tests {
             stack: None,
             service: None,
             pod: false,
-            engine: String::new(),
+            // Explicit (not auto): start() resolves auto specs against the
+            // REAL machine state (kvm readiness), which would make these
+            // process/log tests machine-dependent. The auto policy itself
+            // is tested purely below.
+            engine: "native-namespaces".to_string(),
         }
     }
 
@@ -1415,7 +1499,7 @@ mod tests {
     }
 
     #[test]
-    fn engine_defaults_to_native_and_is_reported() {
+    fn explicit_engines_are_reported_as_started() {
         let (_dir, manager) = test_manager();
         let id = start(&manager, spec(&["echo ok"]));
         assert!(manager.wait_exit(&id, Duration::from_secs(10)));
@@ -1428,12 +1512,75 @@ mod tests {
         // --engine flag, so the run itself still succeeds).
         let mut kvm = spec(&["echo ok"]);
         kvm.engine = "kvm-microvm".to_string();
-        assert!(kvm.is_microvm());
         let kvm_id = start(&manager, kvm);
         assert!(manager.wait_exit(&kvm_id, Duration::from_secs(10)));
         assert_eq!(
             manager.get(&kvm_id).unwrap()["engine"],
             json!("kvm-microvm")
+        );
+    }
+
+    /// The web applies the SAME automatic policy as `myc run` — this is
+    /// the contract that keeps the terminal and the dashboard coherent.
+    /// Pure inputs, no machine state.
+    #[test]
+    fn auto_engine_resolution_matches_the_cli_policy() {
+        let mut auto = spec(&["echo ok"]);
+        auto.engine = String::new();
+
+        // kvm ready + simple app → microVM, with the line the CLI prints.
+        let (label, note) = resolve_engine(&auto, true, false, false);
+        assert_eq!(label, "kvm-microvm");
+        assert_eq!(
+            note.as_deref(),
+            Some("engine: kvm-microvm (auto; strongest available)")
+        );
+
+        // kvm not complete → native, quiet (`myc doctor` explains).
+        let (label, note) = resolve_engine(&auto, false, false, false);
+        assert_eq!(label, "native-namespaces");
+        assert_eq!(note, None);
+
+        // Pod services join namespaces even with kvm ready.
+        let mut pod = auto.clone();
+        pod.pod = true;
+        let (label, note) = resolve_engine(&pod, true, true, false);
+        assert_eq!(label, "native-namespaces");
+        assert!(
+            note.as_deref().unwrap().contains("--join-net"),
+            "note was: {note:?}"
+        );
+
+        // Rootless app exposing ports → native (the VM bridge needs root);
+        // the same app as root takes the microVM.
+        let (label, note) = resolve_engine(&auto, true, false, true);
+        assert_eq!(label, "native-namespaces");
+        assert!(
+            note.as_deref().unwrap().contains("root"),
+            "note was: {note:?}"
+        );
+        let (label, _) = resolve_engine(&auto, true, true, true);
+        assert_eq!(label, "kvm-microvm");
+
+        // pasta isolation is the namespaces feature.
+        let mut isolated = auto.clone();
+        isolated.isolated_network = true;
+        let (label, note) = resolve_engine(&isolated, true, true, false);
+        assert_eq!(label, "native-namespaces");
+        assert!(note
+            .as_deref()
+            .expect("isolated networks explain their fallback")
+            .contains("--net isolated"));
+
+        // Explicit choices pass through untouched, whatever the machine.
+        let mut kvm = auto.clone();
+        kvm.engine = "kvm-microvm".to_string();
+        assert_eq!(resolve_engine(&kvm, false, false, false).0, "kvm-microvm");
+        let mut native = auto;
+        native.engine = "native-namespaces".to_string();
+        assert_eq!(
+            resolve_engine(&native, true, true, true).0,
+            "native-namespaces"
         );
     }
 
