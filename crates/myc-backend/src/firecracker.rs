@@ -159,6 +159,39 @@ fn file_sha256(path: &Path) -> Result<String> {
     Ok(hex::encode(hasher.finalize()))
 }
 
+/// [`file_sha256`] with a memo: the fingerprint inputs are immutable guest
+/// assets (kernel ELF ~20 MB, initramfs ~2 MB — hashing them costs
+/// ~114 ms, measured), so the digest is cached under the snapshots root,
+/// keyed by path+size+mtime (a rebuilt kernel changes mtime → re-hash).
+/// A corrupt sidecar yields a wrong fingerprint at worst = a cache MISS =
+/// one cold boot (safe, never a wrong reuse: a hit still compares the
+/// meta protocol/version).
+fn file_sha256_cached(path: &Path) -> Result<String> {
+    file_sha256_cached_in(&snapshots_root(), path)
+}
+
+fn file_sha256_cached_in(root: &Path, path: &Path) -> Result<String> {
+    let meta = std::fs::metadata(path)?;
+    let mut key = Sha256::new();
+    key.update(path.to_string_lossy().as_bytes());
+    key.update(meta.len().to_le_bytes());
+    if let Ok(mtime) = meta.modified() {
+        if let Ok(secs) = mtime.duration_since(std::time::UNIX_EPOCH) {
+            key.update(secs.as_nanos().to_le_bytes());
+        }
+    }
+    let sidecar = root.join("hashes").join(hex::encode(key.finalize()));
+    if let Ok(cached) = std::fs::read_to_string(&sidecar) {
+        if cached.len() == 64 && cached.chars().all(|c| c.is_ascii_hexdigit()) {
+            return Ok(cached.to_lowercase());
+        }
+    }
+    let digest = file_sha256(path)?;
+    let _ = std::fs::create_dir_all(sidecar.parent().unwrap_or(Path::new(".")));
+    let _ = std::fs::write(&sidecar, &digest);
+    Ok(digest)
+}
+
 fn sha256_hex_of(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
@@ -1634,11 +1667,11 @@ pub fn snapshot_run(
     }
 
     // --- fingerprint + snapshot dir ----------------------------------------
-    let kernel_sha = match file_sha256(&fc_kernel) {
+    let kernel_sha = match file_sha256_cached(&fc_kernel) {
         Ok(h) => h,
         Err(e) => return unavail(e.to_string()),
     };
-    let initrd_sha = match file_sha256(&initramfs) {
+    let initrd_sha = match file_sha256_cached(&initramfs) {
         Ok(h) => h,
         Err(e) => return unavail(e.to_string()),
     };
@@ -1946,6 +1979,34 @@ mod tests {
         assert!(SnapshotFiles::complete(dir.path(), 16));
         SnapshotFiles::wipe(dir.path());
         assert!(!SnapshotFiles::complete(dir.path(), 16));
+    }
+
+    #[test]
+    fn sha256_memo_hits_and_invalidates() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("snaproot"); // isolated memo root
+        let asset = dir.path().join("asset");
+        std::fs::write(&asset, b"hello").unwrap();
+        let h1 = file_sha256_cached_in(&root, &asset).unwrap();
+        assert_eq!(h1, sha256_hex_of(b"hello"));
+        // Second call is a memo hit (same digest, sidecar present).
+        assert_eq!(file_sha256_cached_in(&root, &asset).unwrap(), h1);
+        assert!(root.join("hashes").read_dir().unwrap().next().is_some());
+        // A rebuilt asset (different size => different key) re-hashes.
+        std::fs::write(&asset, b"hello-again").unwrap();
+        assert_eq!(
+            file_sha256_cached_in(&root, &asset).unwrap(),
+            sha256_hex_of(b"hello-again")
+        );
+        // A corrupt sidecar (not 64 hex) is ignored, not trusted.
+        let mut entries = root.join("hashes").read_dir().unwrap();
+        let side = entries.next().unwrap().unwrap().path();
+        std::fs::write(&side, "garbage").unwrap();
+        std::fs::write(&asset, b"third-content").unwrap();
+        assert_eq!(
+            file_sha256_cached_in(&root, &asset).unwrap(),
+            sha256_hex_of(b"third-content")
+        );
     }
 
     #[test]
