@@ -13,6 +13,7 @@ myc-query = { workspace = true }
 myc-compose = { workspace = true }
 myc-run = { workspace = true }
 myc-hub = { workspace = true }
+myc-backend = { workspace = true }
 anyhow = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

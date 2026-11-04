@@ -90,6 +90,34 @@ pub struct ContainerSpec {
     /// valid across holder restarts.
     #[serde(default)]
     pub pod: bool,
+    /// Execution engine label (`native-namespaces`, or `kvm-microvm` for a
+    /// real microVM with its own kernel — passed to `myc run --engine`).
+    /// Empty means the default (native).
+    #[serde(default)]
+    pub engine: String,
+}
+
+/// The engine label reported over the API — the spec stores an empty
+/// string for the default, callers always see an explicit name.
+fn default_engine_label(engine: &str) -> &str {
+    if engine.is_empty() {
+        "native-namespaces"
+    } else {
+        engine
+    }
+}
+
+impl ContainerSpec {
+    /// Engine executing this container (`native-namespaces` or
+    /// `kvm-microvm`); an empty stored value means the native default.
+    pub fn engine_label(&self) -> &str {
+        default_engine_label(&self.engine)
+    }
+
+    /// True when this container runs inside a real microVM.
+    pub fn is_microvm(&self) -> bool {
+        self.engine == "kvm-microvm"
+    }
 }
 
 struct ContainerState {
@@ -135,6 +163,7 @@ impl ContainerState {
             "name": self.spec.name,
             "reference": self.spec.reference,
             "manifest_id": self.spec.manifest_id,
+            "engine": self.spec.engine_label(),
             "command": self.spec.command,
             "env": self.spec.env,
             "workdir": self.spec.workdir,
@@ -411,9 +440,15 @@ impl Manager {
             .arg(&self.store_root)
             .arg("run")
             .arg("--hostname")
-            .arg(&spec.name)
-            .arg("--run-dir")
-            .arg(&run_dir);
+            .arg(&spec.name);
+        // The kvm-microvm engine manages its own working directory and
+        // refuses --run-dir (a VM rootfs is not a host dir to clean up);
+        // every other flag keeps the native semantics.
+        if !spec.is_microvm() {
+            cmd.arg("--run-dir").arg(&run_dir);
+        } else {
+            cmd.arg("--engine").arg("kvm-microvm");
+        }
         for kv in &spec.env {
             cmd.arg("-e").arg(kv);
         }
@@ -1073,6 +1108,7 @@ mod tests {
             stack: None,
             service: None,
             pod: false,
+            engine: String::new(),
         }
     }
 
@@ -1376,6 +1412,29 @@ mod tests {
         assert!(manager.wait_exit(&id, Duration::from_secs(10)));
         std::thread::sleep(Duration::from_millis(200));
         assert_eq!(manager.get(&id).unwrap()["failure_hint"], Value::Null);
+    }
+
+    #[test]
+    fn engine_defaults_to_native_and_is_reported() {
+        let (_dir, manager) = test_manager();
+        let id = start(&manager, spec(&["echo ok"]));
+        assert!(manager.wait_exit(&id, Duration::from_secs(10)));
+        assert_eq!(
+            manager.get(&id).unwrap()["engine"],
+            json!("native-namespaces")
+        );
+
+        // A kvm-microvm spec reports its engine (the shim swallows the
+        // --engine flag, so the run itself still succeeds).
+        let mut kvm = spec(&["echo ok"]);
+        kvm.engine = "kvm-microvm".to_string();
+        assert!(kvm.is_microvm());
+        let kvm_id = start(&manager, kvm);
+        assert!(manager.wait_exit(&kvm_id, Duration::from_secs(10)));
+        assert_eq!(
+            manager.get(&kvm_id).unwrap()["engine"],
+            json!("kvm-microvm")
+        );
     }
 
     #[test]

@@ -188,24 +188,59 @@ impl Store {
             }
             Some(current) if current == requested => Ok(current),
             Some(current) => {
-                let orphans = Self::blobs_only_in_packs(root)?;
-                if !orphans.is_empty() {
-                    return Err(StoreError::Chunk(format!(
-                        "cannot switch chunk mode from '{}' to '{}': {} blob(s) exist only \
-                         as packs, without a v1 blob file (first: {}). They would become \
-                         unreadable. Re-materialize them first — run each environment once \
-                         (any myc run reassembles and caches its blobs) — or re-ingest, \
-                         then switch modes.",
-                        current.as_str(),
-                        requested.as_str(),
-                        orphans.len(),
-                        orphans[0]
-                    )));
-                }
+                Self::guard_switch(root, current, requested)?;
                 chunks::overwrite_chunk_mode(root, requested)?;
                 Ok(requested)
             }
         }
+    }
+
+    /// The store's recorded v2 chunk mode, read without opening the store:
+    /// `None` means the v2 layer was never used (a plain v1 store).
+    pub fn recorded_chunk_mode(root: &Path) -> Result<Option<ChunkMode>> {
+        chunks::read_chunk_mode(root)
+    }
+
+    /// Switch the store's recorded v2 chunk mode with the exact guards of
+    /// [`Store::open`]: the first v2 use records the mode, a later change
+    /// is a no-op when identical and is refused while any blob exists
+    /// solely as packs (switching would make that data unreadable).
+    pub fn switch_chunk_mode(root: &Path, mode: ChunkMode) -> Result<()> {
+        // The mode file is staged through <root>/tmp (see write_noclobber)
+        // — make sure the standard layout exists (first switch on a store
+        // that was never opened by this process).
+        for sub in ["objects", "manifests", "refs", "pins", "tmp"] {
+            let p = root.join(sub);
+            fs::create_dir_all(&p).map_err(|e| io_err(&p, e))?;
+        }
+        match chunks::read_chunk_mode(root)? {
+            None => chunks::write_chunk_mode(root, mode).map(|_| ()),
+            Some(current) if current == mode => Ok(()),
+            Some(current) => {
+                Self::guard_switch(root, current, mode)?;
+                chunks::overwrite_chunk_mode(root, mode)
+            }
+        }
+    }
+
+    /// A mode switch must not orphan data whose only backing store is the
+    /// packs (same check and message as [`Store::open`]).
+    fn guard_switch(root: &Path, current: ChunkMode, requested: ChunkMode) -> Result<()> {
+        let orphans = Self::blobs_only_in_packs(root)?;
+        if orphans.is_empty() {
+            return Ok(());
+        }
+        Err(StoreError::Chunk(format!(
+            "cannot switch chunk mode from '{}' to '{}': {} blob(s) exist only \
+             as packs, without a v1 blob file (first: {}). They would become \
+             unreadable. Re-materialize them first — run each environment once \
+             (any myc run reassembles and caches its blobs) — or re-ingest, \
+             then switch modes.",
+            current.as_str(),
+            requested.as_str(),
+            orphans.len(),
+            orphans[0]
+        )))
     }
 
     /// Blobs that have a chunk sidecar but no v1 blob file — data whose
@@ -960,5 +995,43 @@ mod tests {
         assert_eq!(hash, h2);
         assert!(v2.blob_chunks(&hash).unwrap().is_some());
         assert_eq!(v2.reassemble_blob(&hash).unwrap(), data);
+    }
+
+    #[test]
+    fn switch_chunk_mode_api_records_and_refuses_coherently() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("s");
+
+        // A plain v1 store has no recorded mode.
+        assert_eq!(Store::recorded_chunk_mode(&root).unwrap(), None);
+
+        // First switch records the mode (and reading it back agrees).
+        Store::switch_chunk_mode(&root, ChunkMode::Lean).unwrap();
+        assert_eq!(
+            Store::recorded_chunk_mode(&root).unwrap(),
+            Some(ChunkMode::Lean)
+        );
+
+        // Same-mode switch is a no-op; a coherent switch (both keep v1
+        // blobs, nothing lives only in packs) goes through.
+        Store::switch_chunk_mode(&root, ChunkMode::Lean).unwrap();
+        Store::switch_chunk_mode(&root, ChunkMode::Transfer).unwrap();
+        assert_eq!(
+            Store::recorded_chunk_mode(&root).unwrap(),
+            Some(ChunkMode::Transfer)
+        );
+
+        // A blob that exists only as packs blocks any switch away from it.
+        std::fs::create_dir_all(root.join("chunks")).unwrap();
+        std::fs::write(root.join("chunks/abcdef.chunks"), b"x").unwrap();
+        let err = Store::switch_chunk_mode(&root, ChunkMode::Lean).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("cannot switch chunk mode"), "got: {msg}");
+        assert!(msg.contains("abcdef"), "got: {msg}");
+        // The recorded mode is left untouched by the refused switch.
+        assert_eq!(
+            Store::recorded_chunk_mode(&root).unwrap(),
+            Some(ChunkMode::Transfer)
+        );
     }
 }

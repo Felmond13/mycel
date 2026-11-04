@@ -10,8 +10,10 @@
 //! server (see [`containers`]); stacks are `mycel.toml` projects stored
 //! under `<store>/stacks/` (see [`stacks`]).
 
+mod bench;
 mod containers;
 mod deploy;
+mod engines;
 mod metrics;
 mod share;
 mod stacks;
@@ -47,6 +49,8 @@ struct App {
     manager: Arc<containers::Manager>,
     deploy_jobs: Arc<Mutex<HashMap<u64, deploy::DeployJob>>>,
     next_deploy: Arc<AtomicU64>,
+    /// Shared state of the integrated comparison bench (`/api/bench/compare`).
+    bench: Arc<bench::BenchHub>,
 }
 
 #[derive(Clone, Serialize)]
@@ -78,6 +82,10 @@ impl IntoResponse for ApiError {
 
 fn bad_request(msg: impl Into<String>) -> ApiError {
     ApiError(StatusCode::BAD_REQUEST, msg.into())
+}
+
+fn conflict(msg: impl Into<String>) -> ApiError {
+    ApiError(StatusCode::CONFLICT, msg.into())
 }
 
 fn not_found(msg: impl Into<String>) -> ApiError {
@@ -844,6 +852,25 @@ struct StartContainerBody {
     /// app declares but that are missing here keep their own number.
     #[serde(default)]
     ports: Vec<containers::PortMapping>,
+    /// Execution engine: `native-namespaces` (the default) or
+    /// `kvm-microvm` (real VM with its own kernel — see /api/engines for
+    /// what this machine can do).
+    #[serde(default)]
+    engine: Option<String>,
+}
+
+/// Normalize and validate the requested execution engine: absent, empty
+/// and `auto` all mean the native default; anything but the two known
+/// labels is a 400.
+fn normalize_engine(raw: Option<&str>) -> Result<String, ApiError> {
+    let raw = raw.unwrap_or_default().trim();
+    match raw {
+        "" | "auto" | "native-namespaces" => Ok("native-namespaces".to_string()),
+        "kvm-microvm" => Ok("kvm-microvm".to_string()),
+        other => Err(bad_request(format!(
+            "unknown engine '{other}' (expected native-namespaces or kvm-microvm)"
+        ))),
+    }
 }
 
 /// `UID[:GID]`, both numeric — anything else is rejected.
@@ -874,6 +901,7 @@ async fn start_container(
     if let Some(map) = &body.map_user {
         check_map_user(map)?;
     }
+    let engine = normalize_engine(body.engine.as_deref())?;
     blocking(move || {
         let store = open_store(&app.root)?;
         let manifest_id = resolve_installed(&store, &reference)?;
@@ -920,6 +948,7 @@ async fn start_container(
             stack: None,
             service: None,
             pod: false,
+            engine,
         };
         let id = app.manager.start(spec).map_err(internal)?;
         let mut container = app
@@ -943,6 +972,76 @@ async fn capabilities() -> ApiResult {
     Ok(Json(json!({
         "network_isolation": network_isolation_available(),
     })))
+}
+
+// ---- store disk modes ----
+
+/// The `/api/store/modes` payload: the store's current chunk mode, the
+/// switchable list, and the disk cost of each mode as measured on the
+/// reference corpus (docs/design/store-v2.md §9.4).
+fn store_modes_payload(root: &std::path::Path) -> Result<Value, ApiError> {
+    let current = myc_store::Store::recorded_chunk_mode(root)
+        .map_err(internal)?
+        .map(|m| m.as_str().to_string())
+        .unwrap_or_else(|| "v1".to_string());
+    Ok(json!({
+        "current": current,
+        "available": ["v1", "transfer", "lean", "packs-only"],
+        "measured": {
+            "v1_mib": 60.06,
+            "transfer_mib": 88.77,
+            "lean_mib": 60.48,
+            "packs_only_mib": 32.04,
+            "source": "docs/design/store-v2.md §9",
+        },
+        "note": "Tailles mesurées sur un corpus de 3 images après ingest (§9.4). \
+                 v1 = pas de couche chunk (MYCEL_CHUNKED désactivé) ; transfer, lean \
+                 et packs-only sont les modes v2, épinglés dans le fichier chunk-mode. \
+                 Un changement s'applique à la prochaine utilisation v2 et est refusé \
+                 tant que des blobs n'existent qu'en packs.",
+    }))
+}
+
+/// `GET /api/store/modes`.
+async fn get_store_modes(State(app): State<App>) -> ApiResult {
+    blocking(move || Ok(Json(store_modes_payload(&app.root)?))).await
+}
+
+#[derive(Deserialize)]
+struct StoreModeBody {
+    mode: String,
+}
+
+/// `PUT /api/store/modes` — apply a disk-mode switch through the store's
+/// guarded API. An incoherent switch (blobs only in packs) is a 409 with
+/// the store's plain-language explanation.
+async fn put_store_mode(State(app): State<App>, Json(body): Json<StoreModeBody>) -> ApiResult {
+    blocking(move || {
+        let mode = body.mode.trim();
+        let parsed = match mode {
+            "transfer" | "lean" | "packs-only" => {
+                myc_store::ChunkMode::parse(mode).expect("just matched")
+            }
+            "v1" => {
+                return Err(conflict(
+                    "le mode v1 (aucun chunking) ne s'écrit pas dans le fichier \
+                     chunk-mode : il est choisi en démarrant myc sans MYCEL_CHUNKED=1. \
+                     Les données restent lisibles dans tous les cas.",
+                ))
+            }
+            other => {
+                return Err(bad_request(format!(
+                    "mode inconnu '{other}' (attendu : v1, transfer, lean ou packs-only)"
+                )))
+            }
+        };
+        myc_store::Store::switch_chunk_mode(&app.root, parsed).map_err(|e| match e {
+            myc_store::StoreError::Chunk(msg) => conflict(msg),
+            other => internal(other),
+        })?;
+        Ok(Json(store_modes_payload(&app.root)?))
+    })
+    .await
 }
 
 async fn list_containers(State(app): State<App>) -> ApiResult {
@@ -1347,6 +1446,7 @@ async fn stack_up(State(app): State<App>, UrlPath(name): UrlPath<String>) -> Api
                 stack: Some(name.clone()),
                 service: Some(svc_name.clone()),
                 pod,
+                engine: String::new(),
             };
             app.manager.start(spec).map_err(internal)?;
             started.push(svc_name.clone());
@@ -1450,6 +1550,7 @@ async fn stack_restart_service(
             stack: Some(name.clone()),
             service: Some(svc.clone()),
             pod,
+            engine: String::new(),
         };
         let id = app.manager.start(spec).map_err(internal)?;
         let container = app
@@ -1477,6 +1578,7 @@ pub fn serve(store_root: PathBuf, port: u16) -> anyhow::Result<()> {
         manager: Arc::new(manager),
         deploy_jobs: Arc::new(Mutex::new(HashMap::new())),
         next_deploy: Arc::new(AtomicU64::new(1)),
+        bench: Arc::new(bench::BenchHub::new()),
     };
 
     let router = Router::new()
@@ -1531,6 +1633,12 @@ pub fn serve(store_root: PathBuf, port: u16) -> anyhow::Result<()> {
             "/api/stacks/{name}/services/{svc}/restart",
             post(stack_restart_service),
         )
+        .route("/api/engines", get(engines::list))
+        .route("/api/store/modes", get(get_store_modes))
+        .route("/api/store/modes", axum::routing::put(put_store_mode))
+        .route("/api/snapshots/status", get(bench::snapshots_status))
+        .route("/api/bench/compare", post(bench::start_compare))
+        .route("/api/bench/compare", get(bench::compare_status))
         .with_state(app);
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -1549,8 +1657,9 @@ pub fn serve(store_root: PathBuf, port: u16) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{pick_free_port, plan_ports, PortPlan};
+    use super::{normalize_engine, pick_free_port, plan_ports, store_modes_payload, PortPlan};
     use crate::containers::PortMapping;
+    use serde_json::json;
     use std::collections::HashSet;
 
     fn set(ports: &[u16]) -> HashSet<u16> {
@@ -1638,5 +1747,50 @@ mod tests {
     fn two_busy_ports_get_distinct_free_ones() {
         let plan = plan_ports(&[80, 81], None, false, &[], &set(&[80, 81]), true).unwrap();
         assert_eq!(plan.ports, vec![map(82, 80), map(83, 81)]);
+    }
+
+    #[test]
+    fn engine_selection_defaults_to_native_and_rejects_unknowns() {
+        assert_eq!(normalize_engine(None).unwrap(), "native-namespaces");
+        assert_eq!(normalize_engine(Some("")).unwrap(), "native-namespaces");
+        assert_eq!(normalize_engine(Some("auto")).unwrap(), "native-namespaces");
+        assert_eq!(
+            normalize_engine(Some("native-namespaces")).unwrap(),
+            "native-namespaces"
+        );
+        assert_eq!(
+            normalize_engine(Some("kvm-microvm")).unwrap(),
+            "kvm-microvm"
+        );
+        let err = normalize_engine(Some("firecracker")).unwrap_err();
+        assert_eq!(err.0, axum::http::StatusCode::BAD_REQUEST);
+        assert!(err.1.contains("unknown engine"), "error was: {}", err.1);
+    }
+
+    /// The exact `/api/store/modes` contract: `v1` before any v2 use, the
+    /// four documented modes, and the measured §9.4 sizes verbatim.
+    #[test]
+    fn store_modes_payload_matches_the_api_contract() {
+        let dir = tempfile::tempdir().unwrap();
+        let payload = store_modes_payload(dir.path()).unwrap();
+        assert_eq!(payload["current"], json!("v1"));
+        assert_eq!(
+            payload["available"],
+            json!(["v1", "transfer", "lean", "packs-only"])
+        );
+        assert_eq!(payload["measured"]["v1_mib"], json!(60.06));
+        assert_eq!(payload["measured"]["transfer_mib"], json!(88.77));
+        assert_eq!(payload["measured"]["lean_mib"], json!(60.48));
+        assert_eq!(payload["measured"]["packs_only_mib"], json!(32.04));
+        assert_eq!(
+            payload["measured"]["source"],
+            json!("docs/design/store-v2.md §9")
+        );
+        assert!(payload["note"].as_str().is_some_and(|n| !n.is_empty()));
+
+        // After a switch the current mode follows the recorded one.
+        myc_store::Store::switch_chunk_mode(dir.path(), myc_store::ChunkMode::Lean).unwrap();
+        let payload = store_modes_payload(dir.path()).unwrap();
+        assert_eq!(payload["current"], json!("lean"));
     }
 }
