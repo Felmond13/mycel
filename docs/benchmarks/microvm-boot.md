@@ -55,6 +55,34 @@ and never edited after publication.
   under WSL2-KVM, and residual taps holding the subnet IP silently break
   routing (the engine now clears its tap before every launch).
 
+## Campaign v2 — after the ARP fix (commit `cdbf431`)
+
+The tail analysis (`microvm-tail-analysis.md`) proved the v1 p95 plateau
+(~1060 ms) was the kernel's INCOMPLETE-neighbour ARP timer on first
+contact, not KVM scheduling. Fix: the engine now pre-seeds a permanent ARP
+entry for the (fixed) guest MAC right after tap creation. Re-measured,
+same protocol (ABBA, n=30/series):
+
+| Series | median | p95 | CV |
+|---|---|---|---|
+| A — docker | 455.4 ms | 512.5 ms | 8.5 % |
+| A_b — docker | 479.8 ms | 513.2 ms | 4.0 % |
+| C — microvm | **404.0 ms** | **624.5 ms** | 17.5 % |
+| C_b — microvm | **409.7 ms** | 9044.9 ms* | 216 %* |
+
+**The microVM now beats Docker on the median (~405 vs ~455-480 ms) with a
+full dedicated kernel.** 58 of 60 microvm runs finished in 379-548 ms
+(C: 30/30 under 707 ms, zero plateau).
+
+*Honest asterisk: exactly 2 of 60 runs took ~9 045 ms (both in C_b,
+binary — 9044 and 9052 ms, suspiciously identical). Working theory: the
+first TCP SYN leaves while the guest has not brought eth0 up yet; with the
+ARP entry permanent, the SYN is silently dropped and Linux's SYN
+retransmission backoff (~1+2+4 s…) delays the connection until the guest
+is actually up. Candidate remedies (not yet applied): brief high-frequency
+probing before first SYN, or seeding the ARP entry only after a link-local
+signal from the guest. Raw files archived as `results-v2/`.
+
 ## Reproduce
 
 ```bash
