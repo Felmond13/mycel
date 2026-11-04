@@ -13,16 +13,27 @@
 //!
 //! | route | verb | meaning |
 //! |---|---|---|
-//! | `/ping` | GET | liveness + store stats |
+//! | `/ping` | GET | liveness + store stats + `"chunks"` capability |
 //! | `/manifests` | GET | list manifest summaries |
 //! | `/manifests/{id}` | GET/PUT | fetch / upload a manifest (id re-verified server-side) |
 //! | `/refs` | GET | list name → id |
 //! | `/refs/{name}` | GET/PUT | resolve / set a ref |
 //! | `/blobs/{hash}` | HEAD/GET/PUT | probe / download / upload a blob (re-hashed server-side) |
 //! | `/missing` | POST | body: hashes; response: the subset the server does NOT have |
+//! | `/blobs/{hash}/chunks` | GET/POST | the blob's ordered chunk list / assemble the blob from chunks |
+//! | `/chunks/missing` | POST | body: blob hash + chunk ids; response: chunks the server lacks |
+//! | `/chunks/{chunk_id}` | GET/POST | download / upload one chunk's raw bytes (re-hashed both sides) |
+//!
+//! The blob routes are the v1 protocol and stay exactly as they were; the
+//! chunk routes are the v2 layer (store `MYCEL_CHUNKED=1`, see
+//! `docs/design/store-v2.md` §8): when both ends advertise the chunk
+//! capability, push/pull negotiate at chunk granularity and only the chunks
+//! the receiver is missing cross the wire. A v1 client never calls them and
+//! is unaffected.
 //!
 //! Writes can be protected with a bearer token (`--token`); reads stay open.
 
+pub mod chunkio;
 pub mod client;
 pub mod deploy;
 pub mod remote;
@@ -30,7 +41,7 @@ pub mod server;
 pub mod transfer;
 
 pub use client::HubClient;
-pub use server::{serve, spawn, SpawnedHub};
+pub use server::{serve, spawn, spawn_chunked, SpawnedHub};
 pub use transfer::{pull, pull_manifest_only, push, PullReport, PushReport};
 
 use serde::{Deserialize, Serialize};
@@ -56,6 +67,37 @@ pub struct MissingRequest {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct MissingResponse {
     pub missing: Vec<String>,
+}
+
+/// Body of `POST /api/v1/chunks/missing`: for one blob the client can
+/// already describe (local chunk sidecar), the ordered chunk ids it is made
+/// of. The server answers with the subset it does NOT hold — Bloom filters
+/// first, pack indexes for the final word, so the answer never has a false
+/// "present" and a false "missing" only costs a redundant upload.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ChunkMissingRequest {
+    pub blob_hash: String,
+    pub chunk_ids: Vec<String>,
+}
+
+/// Response of `POST /api/v1/chunks/missing`.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ChunkMissingResponse {
+    /// Chunk ids (64-hex BLAKE3) the server lacks, in request order.
+    pub missing: Vec<String>,
+    /// Packs (64-hex pack names) that hold at least one of the requested
+    /// chunks — hints so a future client can fetch whole packs instead of
+    /// chunk-by-chunk. Informational; the chunk routes ignore them.
+    pub pack_hints: Vec<String>,
+}
+
+/// The ordered chunk-id recipe of one blob. Response of
+/// `GET /api/v1/blobs/{hash}/chunks` (the server's sidecar) and body of
+/// `POST /api/v1/blobs/{hash}/chunks` ("here is the order — assemble the
+/// blob from the chunks I just sent plus the ones you already have").
+#[derive(Debug, Serialize, Deserialize)]
+pub struct BlobChunks {
+    pub chunk_ids: Vec<String>,
 }
 
 /// Body of `PUT /api/v1/refs/{name}`.

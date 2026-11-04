@@ -2,7 +2,8 @@
 //! --from` and the lazy runtime's on-demand blob faults.
 
 use crate::{
-    ManifestSummary, MissingRequest, MissingResponse, RefResponse, SetRefRequest, MODE_HEADER,
+    BlobChunks, ChunkMissingRequest, ChunkMissingResponse, ManifestSummary, MissingRequest,
+    MissingResponse, RefResponse, SetRefRequest, MODE_HEADER,
 };
 use myc_manifest::Manifest;
 use myc_store::Store;
@@ -27,6 +28,10 @@ pub enum HubError {
     },
     #[error("hub sent a corrupt blob: expected {expected}, got {actual}")]
     CorruptBlob { expected: String, actual: String },
+    #[error("hub sent a corrupt chunk: expected {expected}, got {actual}")]
+    CorruptChunk { expected: String, actual: String },
+    #[error("protocol encoding failed: {0}")]
+    Serde(#[from] serde_json::Error),
     #[error(transparent)]
     Store(#[from] myc_store::StoreError),
     #[error(transparent)]
@@ -197,6 +202,107 @@ impl HubClient {
         }
         Ok(size)
     }
+
+    // ---- chunk layer (v2) ----
+
+    /// What the hub supports, from `GET /ping`. A hub that does not answer
+    /// the `chunks` field (any v1 hub) reports `chunks: false`, and callers
+    /// fall back to the whole-blob protocol.
+    pub fn capabilities(&self) -> Result<Capabilities> {
+        let ping = self.ping()?;
+        Ok(Capabilities {
+            chunks: ping
+                .get("chunks")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false),
+        })
+    }
+
+    /// Which chunks of one blob the hub is missing (`POST /chunks/missing`).
+    pub fn chunks_missing(
+        &self,
+        blob_hash: &str,
+        chunk_ids: &[String],
+    ) -> Result<ChunkMissingResponse> {
+        let resp = self.send(self.http.post(self.url("chunks/missing")).json(
+            &ChunkMissingRequest {
+                blob_hash: blob_hash.to_string(),
+                chunk_ids: chunk_ids.to_vec(),
+            },
+        ))?;
+        Ok(self.checked(resp, "chunk negotiation")?.json()?)
+    }
+
+    /// The hub's ordered chunk list for one blob (`GET /blobs/{hash}/chunks`).
+    /// `Ok(None)` when the hub has no chunk sidecar for it (blob pushed via
+    /// the v1 route, or below the chunking threshold).
+    pub fn blob_chunks(&self, blob_hash: &str) -> Result<Option<Vec<String>>> {
+        let resp = self.send(
+            self.http
+                .get(self.url(&format!("blobs/{blob_hash}/chunks"))),
+        )?;
+        match self.checked(resp, &format!("chunk list of blob {blob_hash}")) {
+            Ok(r) => Ok(Some(r.json::<BlobChunks>()?.chunk_ids)),
+            Err(HubError::NotFound { .. }) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Download one chunk's raw bytes, verifying the BLAKE3 against the
+    /// requested id — the symmetric guarantee of `put_chunk`.
+    pub fn get_chunk(&self, chunk_id: &str) -> Result<Vec<u8>> {
+        let resp = self.send(self.http.get(self.url(&format!("chunks/{chunk_id}"))))?;
+        let bytes = self.checked(resp, &format!("chunk {chunk_id}"))?.bytes()?;
+        let actual = blake3::hash(&bytes).to_hex().to_string();
+        if actual != chunk_id {
+            return Err(HubError::CorruptChunk {
+                expected: chunk_id.to_string(),
+                actual,
+            });
+        }
+        Ok(bytes.to_vec())
+    }
+
+    /// Upload one chunk's raw bytes (`POST /chunks/{id}`). The server
+    /// re-hashes and rejects on mismatch, exactly like blob uploads.
+    pub fn put_chunk(&self, chunk_id: &str, bytes: &[u8]) -> Result<()> {
+        let resp = self.send(
+            self.auth(self.http.post(self.url(&format!("chunks/{chunk_id}"))))
+                .header("content-type", "application/octet-stream")
+                .body(bytes.to_vec()),
+        )?;
+        self.checked(resp, &format!("chunk {chunk_id}"))?;
+        Ok(())
+    }
+
+    /// Ask the hub to assemble one blob from the chunks it now has (staged
+    /// by `put_chunk` plus whatever its packs already held), following the
+    /// ordered recipe. The hub re-hashes the assembled blob against `hash`
+    /// before storing it. Returns the request body size (the recipe bytes
+    /// that crossed the wire).
+    pub fn assemble_blob(&self, blob_hash: &str, chunk_ids: &[String], mode: u32) -> Result<u64> {
+        let body = serde_json::to_vec(&BlobChunks {
+            chunk_ids: chunk_ids.to_vec(),
+        })?;
+        let resp = self.send(
+            self.auth(
+                self.http
+                    .post(self.url(&format!("blobs/{blob_hash}/chunks"))),
+            )
+            .header(MODE_HEADER, format!("{mode:o}"))
+            .header("content-type", "application/json")
+            .body(body.clone()),
+        )?;
+        self.checked(resp, &format!("assembly of blob {blob_hash}"))?;
+        Ok(body.len() as u64)
+    }
+}
+
+/// Hub feature flags, negotiated through `GET /ping`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Capabilities {
+    /// The hub serves the v2 chunk routes (`MYCEL_CHUNKED=1` on its store).
+    pub chunks: bool,
 }
 
 /// Permission bits of a stored blob (for forwarding on upload).

@@ -1,6 +1,6 @@
 [package]
 name = "myc-hub"
-description = "Mycel hub: share a content-addressed store over HTTP — push and pull only the blobs the other side is missing"
+description = "Mycel hub: share a content-addressed store over HTTP — push and pull only the chunks the other side is missing (v2) or the blobs (v1)"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -16,7 +16,9 @@ axum = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 reqwest = { workspace = true }
+blake3 = { workspace = true }
+hex = { workspace = true }
+zstd = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
-blake3 = { workspace = true }

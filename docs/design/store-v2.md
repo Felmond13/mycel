@@ -183,6 +183,7 @@ Lecture :
   (`myc-hub`) n'échange pas `missing_chunks`, le gain v2 n'est pas encore
   réalisé sur le réseau — cette v2 pose les fondations (API + formats +
   mesures), la négociation par chunks est l'étape suivante.
+  *(Réalisé depuis — voir §8.)*
 - **Pas de refcount par chunk** : le GC supprime des packs entiers (exact
   pour la granularité pack, jamais sous-optimal en dessous). Un chunk
   partagé par deux packs vivants existe deux fois — cas rare (un chunk
@@ -200,6 +201,7 @@ Lecture :
 2. **Hub par chunks** : le serveur expose `has_chunk`/`missing_chunks` ;
    le client pousse/tire par pack (delta de chunks) — le gain réseau mesuré
    en §4 devient réel ; validation bit-à-bit via `reassemble_blob`.
+   *(Fait, au grain chunk — voir §8.)*
 3. **Bascule par défaut** : `Store::open_chunked` devient le défaut du CLI
    une fois le hub par chunks déployé et le surcoût disque (+48,7 % mesuré
    sur alpine ; ~50 % des blobs en packs *compressés*) jugé acceptable au
@@ -207,3 +209,158 @@ Lecture :
 4. **Après adoption** : refcount par chunk, fusion du chunk final court,
    dictionnaire zstd par pack (`zstd --train`) pour compresser les petits
    chunks comme des gros.
+
+## 8. Hub par chunks (négociation push/pull au niveau bloc)
+
+> Implémenté dans `crates/myc-hub` (`server.rs`, `client.rs`, `transfer.rs`,
+> `chunkio.rs`, tests `tests/chunks.rs`). État : mesuré le 2026-11-03.
+
+Le protocole `/api/v1` s'étend de trois routes **additives** — les routes
+blobs v1 existantes restent inchangées et un client v1 fonctionne sans
+aucune modification contre un hub v2 (et réciproquement) :
+
+| route | verb | rôle |
+|---|---|---|
+| `POST /chunks/missing` | corps `{blob_hash, chunk_ids:[…64-hex…]}` | le serveur répond `{missing:[…], pack_hints:[…]}` : les chunks qu'il N'A PAS (Bloom d'abord, index `.idx` pour le verdict final — jamais de faux « présent »), et les packs qui contiennent les chunks demandés déjà présents (indices pour un futur transfert par pack) |
+| `GET /chunks/{id}` | octets bruts du chunk (décompressés) | le serveur relit la frame zstd du pack, décompresse, **re-hache** contre l'id avant de répondre |
+| `POST /chunks/{id}` | corps = octets bruts | réception d'un chunk : re-haché serveur contre l'id, rejet si différent (même règle que les blobs), mis en *staging* (`<store>/hub-staging/<id>`, adressé par contenu, renommage atomique) |
+| `GET /blobs/{hash}/chunks` | `{chunk_ids:[…]}` | la recette ordonnée du blob selon le sidecar du serveur (404 sinon → le client retombe sur la route blob v1) |
+| `POST /blobs/{hash}/chunks` | corps `{chunk_ids:[…]}` | assemblage : le serveur reconcatène staging + chunks de SES packs, **re-hache le blob entier** contre `hash`, puis `put_blob_with_mode` |
+
+### Négociation et bascule automatique
+
+Le `/ping` du hub porte désormais `"chunks": true|false` (le store du hub
+est-il ouvert avec la couche v2 — `MYCEL_CHUNKED=1` côté `myc hub serve`).
+`transfer::push`/`pull` (appelés tels quels par le CLI et le web) :
+
+1. store local v2 (`store.chunked()`) **et** hub `chunks:true` → protocole
+   chunk ;
+2. sinon → chemin blobs v1 inchangé, silencieusement ; avec un message
+   informatif quand seul le hub fait barrage (« hub … does not support
+   chunk negotiation »).
+
+`PushReport`/`PullReport` gagnent `chunked` et `chunks_uploaded/downloaded`
+; les champs existants gardent leur sémantique (les octets comptés sont
+les charges utiles : blobs entiers, chunks, recettes — les négociations
+`/missing` et `/chunks/missing` ne sont pas comptées, par symétrie v1/v2).
+
+### PUSH chunké (par blob manquant)
+
+```text
+client                                 hub (store chunké)
+  │ POST /missing {hashes}          →  blobs manquants
+  │ pour chaque blob manquant :
+  │   sidecar local → chunk_ids
+  │   POST /chunks/missing          →  missing (Bloom d'abord)
+  │   POST /chunks/<id> ×n          →  staging (re-hachés)
+  │   POST /blobs/<hash>/chunks     →  assemblage + put_blob
+  │ PUT manifest, PUT ref           (une fois tous les blobs complets)
+```
+
+Blobs sans sidecar local (< 64 Kio, ou ingérés avant v2) : route blob v1
+pour ce blob. Le serveur reconstruit **le blob complet** : staging + ses
+propres packs relus, blob re-haché, `put_blob_with_mode` écrit le fichier
+v1 (les pulls v1 continuent de marcher) **et** ré-indexe les chunks dans
+SES packs — seule la partie réellement nouvelle est recompressée (les
+chunks partagés dédupliquent via l'index existant).
+
+### PULL chunké (symétrique)
+
+```text
+client (store chunké)                 hub
+  │ GET manifest + ref
+  │ blobs manquants locaux (Store::missing_blobs)
+  │ pour chaque blob manquant :
+  │   GET /blobs/<hash>/chunks    →  recette serveur (404 → blob v1)
+  │   Store::missing_chunks(...)  →  chunks réellement absents locaux
+  │   GET /chunks/<id> ×n         →  octets re-hachés contre l'id
+  │   assemblage local (packs locaux + téléchargés),
+  │   BLAKE3 du blob vérifié, put_blob_with_mode
+```
+
+Le pull chunké traite les blobs séquentiellement (l'assemblage tient le
+blob en RAM, comme l'indexeur du store — garde-fou ≤ 256 Mio) ; le push
+chunké garde le pool de 8 threads (lecture par chunk, ~16 Kio par tampon).
+
+### Décisions
+
+- **`GET /chunks/{id}` décompresse côté serveur** (choisi) plutôt que de
+  servir une fenêtre brute `?pack=<h>&offset&len` (écarté) : un chunk fait
+  ≤ 16 Kio, le coût est négligeable ; le client ne peut pas être induit en
+  erreur par des offsets périmés après un GC qui aurait supprimé le pack ;
+  et le serveur re-hache avant de répondre. `pack_hints` reste dans la
+  réponse pour un futur transfert par pack entier.
+- **Staging serveur adressé par contenu** (`hub-staging/`) : re-pousser un
+  chunk déjà stagé est un no-op ; `chunks/missing` considère un chunk
+  stagé comme présent (un push interrompu puis rejoué ne renvoie rien deux
+  fois) ; l'assemblage consomme et supprime les fichiers stagés. Un staging
+  orphelin (push abandonné) n'est jamais corrompant — il est re-vérifié à
+  la lecture et supprimé s'il ne hache pas — mais il persiste sur disque
+  (le GC v1 ne le connaît pas) ; son nettoyage restera à la charge d'un
+  futur `hub gc`.
+- **Le serveur reste l'autorité** : aucun hash client n'est cru — chunks
+  re-hachés à la réception, blob re-haché à l'assemblage, recette plafonnée
+  à la taille max de blob chunké (256 Mio) contre l'amplification.
+- **Compat v1 par construction** : un hub chunké sert les blobs v1 (le
+  fichier entier existe toujours) ; un hub v1 voit simplement des clients
+  qui retombent sur `/blobs`. Testé dans les deux sens.
+
+### Chiffres mesurés (`myc-hub` tests d'intégration, 2026-11-03)
+
+Scénario « alpine de labo » : E1 = 2 gros fichiers structurés (~224 Kio,
+aléatoire + région répétée + queue quasi-identique) + 1 Kio de config ;
+E2 = mêmes fichiers avec 64 octets édités + 8 Kio appendés, config
+inchangée, + un nouveau fichier de 2 Kio. *Push* : hub pré-chargé E1 reçoit
+E2 depuis le store A. *Pull* : store B (déjà détenteur d'E1) tire E2.
+Contrôles : même scénario par le chemin blobs v1 (mêmes contenus, mêmes
+états initiaux), octets comptés côté client dans les deux modes.
+
+| Mesure (E2 après E1) | v1 (blobs) | v2 (chunks) | économie |
+|---|---|---|---|
+| **Push** (hub a déjà E1) | 468 992 o (3 blobs) | **27 135 o** (3 chunks + 2 recettes) | **−94,2 %** |
+| **Pull** (B a déjà E1) | 468 992 o (3 blobs) | **19 065 o** (3 chunks) | **−95,9 %** |
+| Re-push / re-pull E2 | — | 0 o (0 chunk) | idempotent |
+
+Lecture : 64 octets édités dans un blob de ~230 Kio n'invalident que 1–2
+chunks (CDC déterministe, re-synchronisation ≤ 16 Kio) ; le fichier de
+2 Kio passe entier dans les deux modes (sous le seuil de 64 Kio, dédup
+fichier-entier). **Attention** : ce scénario isole le cas « contenu
+versionné » (le meilleur cas, ~98 % au prototype). Sur le vrai corpus
+alpine 3.20 → 3.21 de §4 (binaires *reconstruits*), le gain attendu est
+celui mesuré au niveau store : ~6,7 Mio transférés au lieu de 7,7 Mio
+(**−12,9 %**) — la négociation par chunks transfère exactement les
+« nouveaux chunks » du tableau §4, plus la recette (~34 o/chunk).
+
+- **Coût serveur** (build debug, localhost, pour mémoire) : push E2 chunké
+  27 ms vs 11 ms en mode blob ; pull 79 ms vs 56 ms. Le surcoût =
+  assemblage (relire/décompresser les chunks partagés + re-hacher le blob
+  + re-découper/re-compresser les chunks nouveaux via `put_blob`) et la
+  granularité HTTP par chunk. À l'échelle alpine (7,4 Mio), extrapolé des
+  mesures §4 (~+2 s/ingest en debug), l'assemblage ajoute ~une passe
+  d'ingest CPU par blob — le prix d'un stockage serveur v1-compatible.
+- Round-trip vérifié : après pull chunké, `missing_blobs` vide (prêt à
+  `run`), chaque blob re-haché, `reassemble_blob` == octets d'origine, et
+  le hub lui-même resert le blob entier à un client v1.
+
+### Limites et suite
+
+- **Octets comptés = charges utiles** (corps de requêtes/réponses blob +
+  chunk + recette) ; les en-têtes HTTP et les négociations ne sont pas
+  comptés — le mode chunk fait plus de requêtes (une par chunk), son
+  surcoût d'en-têtes n'apparaît donc pas dans le chiffre ; négligeable à
+  l'échelle (66 o d'en-têtes pour ≤ 16 Kio de données).
+- **Pull chunké séquentiel** (RAM), push parallèle ; un transfert par pack
+  entier (`pack_hints` déjà renvoyés) réduirait les allers-retours.
+- **API myc-store à compléter** (contourné dans `myc-hub`, à hoister) :
+  1. *lecture d'un chunk isolé* absente de l'API publique → `myc-hub/src/chunkio.rs`
+     re-implémente le parseur du format `.idx` (magique `MYCPACKI1`,
+     stable et documenté) + décompression de frame + re-hachage ;
+  2. *ingest de chunks individuels / écriture de sidecar* absents → le
+     serveur reconstruit le blob complet et repasse par `put_blob_with_mode`
+     (re-découpe + re-compression des chunks nouveaux) ; une future
+     `Store::put_chunk` éliminerait ce passage.
+- Le CLI n'a pas été modifié : la bascule automatique vit dans
+  `myc-hub/transfer.rs`, appelé tel quel par `myc push`/`myc pull` et le
+  dashboard ; seuls les nouveaux champs des rapports (`chunked`, compteur
+  de chunks) ne sont pas encore affichés par `myc-cli` (champ libre pour
+  une future ligne « pushed … (N chunks) »).
