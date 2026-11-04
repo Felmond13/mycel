@@ -5,9 +5,13 @@
 # /dev/vda (fallback) — puis switch_root vers /myc/init-guest (stage 2,
 # écrit par l'hôte DANS le rootfs avec /myc/run.env ; ce script ne contient
 # donc AUCUNE connaissance de la charge).
-# Sortie : bench/microvm/assets/init-vm.cpio
+# Sortie : bench/microvm/assets/init-vm.cpio (ARCH=x86_64, défaut) ou
+# init-vm-aarch64.cpio (ARCH=aarch64) — le contenu /init est identique,
+# seul le busybox embarqué change : celui du runner, NATIF de l'arch
+# (vérifié ci-dessous — un busybox d'une autre arch ferait un guest muet).
 # Option --install : copie aussi kernel vmfs + initramfs vers
-# /usr/local/share/mycel (chemins par défaut du moteur, root requis).
+# /usr/local/share/mycel (chemins par défaut du moteur, root requis ;
+# noms suffixés -aarch64 quand ARCH=aarch64).
 #
 # Différences avec mkinitramfs.sh (bench) : pas de benchhttp, pas d'IP fixe
 # codée en dur (mycip= sur la cmdline), montage du vrai rootfs + switch_root.
@@ -22,9 +26,22 @@ set -euo pipefail
 
 HERE=$(cd "$(dirname "$0")" && pwd)
 ASSETS="$HERE/assets"
-OUT="$ASSETS/init-vm.cpio"
+ARCH=${ARCH:-x86_64}
+case "$ARCH" in
+  x86_64) OUT="$ASSETS/init-vm.cpio" ;;
+  aarch64) OUT="$ASSETS/init-vm-aarch64.cpio" ;;
+  *) echo "ARCH invalide : '$ARCH' (attendu : x86_64 ou aarch64)" >&2; exit 1 ;;
+esac
 
 [ -x /usr/bin/busybox ] || { echo "busybox manquant : apt-get install busybox-static" >&2; exit 1; }
+# Garde-fou arch (aarch64 uniquement — x86_64 : comportement inchangé) : le
+# busybox copié DOIT être de l'arch demandée, sinon l'initramfs boote mais
+# /init meurt en silence. `file` absent → avertissement, on continue.
+if [ "$ARCH" = "aarch64" ] && command -v file >/dev/null 2>&1; then
+  BUSYBOX_ARCH=$(file -b /usr/bin/busybox)
+  echo "$BUSYBOX_ARCH" | grep -qi aarch64 \
+    || { echo "busybox /usr/bin/busybox n'est pas aarch64 ($BUSYBOX_ARCH) — exécutez sur un runner/hôte arm64 natif" >&2; exit 1; }
+fi
 
 STAGE=$(mktemp -d)
 trap 'rm -rf "$STAGE"' EXIT
@@ -143,7 +160,8 @@ if [ "${1:-}" = "--install" ]; then
   DST=/usr/local/share/mycel
   [ "$(id -u)" -eq 0 ] || { echo "--install requiert root" >&2; exit 1; }
   mkdir -p "$DST"
-  cp "$OUT" "$DST/init-vm.cpio"
-  cp "$ASSETS/vmlinux-vmfs" "$DST/vmlinux-vmfs"
-  echo "installé : $DST/init-vm.cpio + $DST/vmlinux-vmfs"
+  cp "$OUT" "$DST/"
+  KERNEL_OUT="vmlinux-vmfs$([ "$ARCH" = "aarch64" ] && printf '%s' '-aarch64')"
+  cp "$ASSETS/$KERNEL_OUT" "$DST/$KERNEL_OUT"
+  echo "installé : $DST/$(basename "$OUT") + $DST/$KERNEL_OUT"
 fi

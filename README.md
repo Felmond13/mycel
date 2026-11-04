@@ -184,25 +184,37 @@ services and one-shot commands.
 
 ## Install
 
-**One command (Linux x86_64 — WSL2 included):**
+**One command (Linux x86_64 or aarch64 — WSL2 included):**
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Felmond13/mycel/main/scripts/install.sh | sh
 ```
 
-The script detects the platform, downloads `myc-linux-x86_64` from the
+The script detects the platform, downloads `myc-linux-x86_64` or
+`myc-linux-aarch64` from the
 [latest release](https://github.com/Felmond13/mycel/releases) into
 `~/.local/bin` (`/usr/local/bin` when run as root) and tells you what to do
 when that directory is not on your `PATH`. It finishes with `myc doctor`.
 Useful flags: `--version vX.Y.Z` pins a release, `--with-vm` also installs
-the microVM guest assets (below).
+the microVM guest assets (below; x86_64 hosts).
 
 **Direct download** — grab a binary from
 [Releases](https://github.com/Felmond13/mycel/releases):
-`myc-linux-x86_64` (Linux, glibc — runs on current distros and WSL2) and
+`myc-linux-x86_64` and `myc-linux-aarch64` (Linux, glibc — run on current
+distros; x86_64 covers WSL2) and
 `myc-windows-x86_64.exe` (Windows — self-contained, embeds its own Linux
 twin). Sources stay public (BUSL-1.1); releases are prebuilt binaries, the
 client never compiles anything.
+
+**Platforms, honestly.** Binaries ship for linux-amd64, linux-arm64 and
+windows-amd64. The whole workspace is continuously built and tested on
+aarch64 (`.github/workflows/ci-arm64.yml`, native arm64 runners). The KVM
+microVM engine, however, executes **x86_64 guests only**: aarch64 guest
+assets (`vmlinux-vmfs-aarch64`, `init-vm-aarch64.cpio`) are published as
+release artifacts, but the engine wiring there is pending hardware
+validation — no boot or e2e has been measured on arm64, so nothing is
+claimed. On aarch64, containers run through `native-namespaces` (the
+default engine everywhere).
 
 **Updating** — `myc update` downloads the latest release for this platform,
 verifies it against the published `.sha256` sidecar and swaps it in

@@ -51,10 +51,43 @@ jobs:
             myc-linux-x86_64
             myc-linux-x86_64.sha256
 
-  # TODO(aarch64): no prebuilt Linux aarch64 binary yet. A cross build needs
-  # more than `cargo build --target aarch64-unknown-linux-gnu` (cross glibc
-  # toolchain + linker, and myc-run's nix/libc mount code untested there) —
-  # revisit with a native arm64 runner or a proper cross image.
+  # aarch64 (was TODO(aarch64)): native build on GitHub's free arm64 runners
+  # (public repos — label `ubuntu-24.04-arm`), no cross toolchain involved.
+  # The workspace is continuously validated on the same runner image by
+  # .github/workflows/ci-arm64.yml (fmt + clippy + tests); this job only
+  # runs on tags, so it cannot be exercised without cutting a release —
+  # that is the accepted, documented limitation.
+  # HONEST SCOPE (project LOI: no unmeasured claims): this ships the
+  # aarch64 *binary distribution*; the kvm-microvm engine still executes
+  # x86_64 guests only (see crates/myc-backend/src/kvm.rs — the guard
+  # reports the engine unavailable on aarch64 hosts).
+  linux-aarch64:
+    name: Linux aarch64
+    # Same glibc rationale as the x86_64 job (no musl; nix/libc types).
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build release binary
+        run: cargo build --release -p myc-cli
+
+      - name: Rename binary + sha256 sidecar
+        run: |
+          cp target/release/myc myc-linux-aarch64
+          ./myc-linux-aarch64 --version
+          sha256sum myc-linux-aarch64 > myc-linux-aarch64.sha256
+
+      - name: Attach to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            myc-linux-aarch64
+            myc-linux-aarch64.sha256
 
   assets-microvm:
     name: microVM guest assets (kernel + initramfs)
@@ -118,6 +151,75 @@ jobs:
             bench/microvm/assets/init-vm.cpio
             bench/microvm/assets/init-vm.cpio.sha256
             bench/microvm/assets/README-assets.txt
+
+  # aarch64 guest assets, kept as a SEPARATE job from assets-microvm so the
+  # x86_64 pipeline stays untouched. Same scripts, ARCH=aarch64, NATIVE
+  # build on the arm64 runner (no cross-compiler). HONEST SCOPE: these
+  # assets are published for the aarch64 pipeline; the kvm-microvm engine
+  # does NOT consume them yet (engine wiring pending hardware validation —
+  # no boot, no e2e, no number has been measured on arm64; see
+  # docs/isolation-engines.md). The kernel/initramfs build itself can be
+  # exercised before a tag via ci-arm64.yml (workflow_dispatch, job
+  # guest-assets-aarch64).
+  assets-microvm-arm64:
+    name: microVM guest assets (kernel + initramfs, aarch64)
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential flex bison bc libelf-dev libssl-dev cpio busybox-static xz-utils file
+
+      - name: Build guest kernel (vmlinux-vmfs-aarch64)
+        run: |
+          # mkinit-vm.sh is committed 0644 — exec bit restored here.
+          chmod +x bench/microvm/build_kernel_vmfs.sh bench/microvm/mkinit-vm.sh
+          ARCH=aarch64 bench/microvm/build_kernel_vmfs.sh
+
+      - name: Build guest initramfs (init-vm-aarch64.cpio)
+        run: ARCH=aarch64 bench/microvm/mkinit-vm.sh
+
+      - name: sha256 sidecars + assets README
+        run: |
+          cd bench/microvm/assets
+          sha256sum vmlinux-vmfs-aarch64 > vmlinux-vmfs-aarch64.sha256
+          sha256sum init-vm-aarch64.cpio > init-vm-aarch64.cpio.sha256
+          cat > README-assets-aarch64.txt <<'EOF'
+          Mycel KVM microVM guest assets — aarch64
+          =======================================
+
+          vmlinux-vmfs-aarch64   guest kernel: minimal Linux 6.12.x arm64 with
+                                 VIRTIO_FS + FUSE_FS + EXT4_FS + OVERLAY_FS
+                                 built in, PL011 console (built from
+                                 bench/microvm/build_kernel_vmfs.sh with
+                                 ARCH=aarch64, native arm64 build).
+          init-vm-aarch64.cpio   generic guest initramfs (arm64 busybox +
+                                 /init stage 1, built from
+                                 bench/microvm/mkinit-vm.sh with ARCH=aarch64).
+
+          STATUS — read before using: these assets are PUBLISHED, not
+          VALIDATED. The myc kvm-microvm engine currently executes x86_64
+          guests only; on aarch64 hosts it reports itself unavailable
+          (`myc doctor` explains). Engine wiring on arm64 is pending
+          hardware validation — no boot or e2e measurement exists yet.
+
+          Verify with sha256sum -c <file>.sha256 (each sidecar sits next to
+          its asset).
+          EOF
+          ls -l vmlinux-vmfs-aarch64 init-vm-aarch64.cpio *.sha256 README-assets-aarch64.txt
+
+      - name: Attach to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            bench/microvm/assets/vmlinux-vmfs-aarch64
+            bench/microvm/assets/vmlinux-vmfs-aarch64.sha256
+            bench/microvm/assets/init-vm-aarch64.cpio
+            bench/microvm/assets/init-vm-aarch64.cpio.sha256
+            bench/microvm/assets/README-assets-aarch64.txt
 
   windows:
     name: Windows x86_64 (embedded Linux twin)

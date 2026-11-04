@@ -1,13 +1,13 @@
 #!/bin/sh
-# Mycel binary installer (Linux x86_64, WSL2 included).
+# Mycel binary installer (Linux x86_64 + aarch64, WSL2 included).
 #
 #   curl -fsSL https://raw.githubusercontent.com/Felmond13/mycel/main/scripts/install.sh | sh
 #
-# Downloads the prebuilt `myc-linux-x86_64` binary from the latest GitHub
-# release into ~/.local/bin (/usr/local/bin when run as root). When /dev/kvm
-# is present it offers — or with --with-vm installs without asking — the
-# KVM microVM guest assets (vmlinux-vmfs + init-vm.cpio) into
-# /usr/local/share/mycel/. Finishes with `myc doctor`.
+# Downloads the prebuilt `myc-linux-x86_64` / `myc-linux-aarch64` binary
+# from the latest GitHub release into ~/.local/bin (/usr/local/bin when run
+# as root). On x86_64 with /dev/kvm present it offers — or with --with-vm
+# installs without asking — the KVM microVM guest assets (vmlinux-vmfs +
+# init-vm.cpio) into /usr/local/share/mycel/. Finishes with `myc doctor`.
 #
 # Options:
 #   --version vX.Y.Z   install a specific release tag (default: latest)
@@ -55,7 +55,11 @@ done
 
 # --- platform gate ---------------------------------------------------------
 [ "$(uname -s)" = "Linux" ] || die "prebuilt binaries are Linux only; on Windows use myc-windows-x86_64.exe from the releases page"
-[ "$(uname -m)" = "x86_64" ] || die "no prebuilt binary for $(uname -m) yet - build from source: cargo build --release -p myc-cli"
+case "$(uname -m)" in
+    x86_64) BINARY=myc-linux-x86_64 ;;
+    aarch64) BINARY=myc-linux-aarch64 ;;
+    *) die "no prebuilt binary for $(uname -m) yet - build from source: cargo build --release -p myc-cli" ;;
+esac
 if grep -qi microsoft /proc/version 2>/dev/null; then
     note "WSL2 detected - the Linux x86_64 binary is the supported path here"
 fi
@@ -90,8 +94,8 @@ else
     DEST_DIR=$HOME/.local/bin
 fi
 
-note "downloading myc-linux-x86_64"
-fetch_asset "$DLBASE/$VERSION/myc-linux-x86_64" "$TMP/myc" 1000000 "myc-linux-x86_64"
+note "downloading $BINARY"
+fetch_asset "$DLBASE/$VERSION/$BINARY" "$TMP/myc" 1000000 "$BINARY"
 chmod 755 "$TMP/myc"
 
 mkdir -p "$DEST_DIR"
@@ -149,7 +153,14 @@ install_vm_assets() {
     note "guest assets installed: $ASSET_DIR/vmlinux-vmfs, $ASSET_DIR/init-vm.cpio"
 }
 
-if wants_vm; then
+if [ "$(uname -m)" != "x86_64" ]; then
+    # Honest scope: the aarch64 guest assets exist as release artifacts
+    # (vmlinux-vmfs-aarch64 + init-vm-aarch64.cpio) but the kvm-microvm
+    # engine executes x86_64 guests only - installing the x86_64 assets
+    # here would be cargo for an engine that reports itself unavailable.
+    note "aarch64 host - kvm-microvm executes x86_64 guests only (engine wiring pending hardware validation); skipping the guest assets"
+    note "myc runs everything through native-namespaces, the default engine"
+elif wants_vm; then
     install_vm_assets
 elif [ "$WITH_VM" != yes ] && [ ! -e /dev/kvm ]; then
     note "no /dev/kvm - skipping the microVM guest assets (install.sh --with-vm to force)"
