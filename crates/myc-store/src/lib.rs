@@ -8,15 +8,25 @@
 //!   manifests/myc1-....json      manifests, named by manifest id
 //!   refs/<escaped name>          name -> manifest id
 //!   pins/<manifest id>           GC roots
+//!   packs/pack-<hash>.zst        v2 chunk packs (opt-in, see `chunks`)
+//!   chunks/<blob-hash>.chunks    v2 chunk sidecars (opt-in)
 //!   lock                         inter-process lock file
 //! ```
 //!
 //! Blobs are written atomically (temp file + rename) and stored read-only.
 //! Every file of every environment lives here exactly once; rootfs
 //! materialization hardlinks out of this store.
+//!
+//! The v2 chunk layer (`chunks` module, enabled by `MYCEL_CHUNKED=1`) is
+//! purely additive: blob files, manifests and their ids are untouched, and
+//! chunk packs exist only to deduplicate future *transfers*. See
+//! `docs/design/store-v2.md` for the full design.
 
 pub mod archive;
+pub mod chunks;
 pub mod volumes;
+
+pub use chunks::{ChunkId, ChunkStats};
 
 use fs2::FileExt;
 use myc_manifest::Manifest;
@@ -41,6 +51,8 @@ pub enum StoreError {
     HashMismatch { expected: String, actual: String },
     #[error("invalid volume name '{0}' (use 1-64 lowercase letters, digits, . _ -, starting with a letter or digit)")]
     InvalidVolumeName(String),
+    #[error("chunk layer: {0}")]
+    Chunk(String),
     #[error(
         "the store is busy (another process is writing to it right now) — try again in a moment"
     )]
@@ -71,6 +83,7 @@ fn readonly_mode(mode: u32) -> u32 {
 pub struct Store {
     root: PathBuf,
     _lock: fs::File,
+    chunked: bool,
 }
 
 pub struct BlobStats {
@@ -80,12 +93,29 @@ pub struct BlobStats {
 
 impl Store {
     /// Open (creating if needed) the store at `root` and take a shared
-    /// inter-process lock. GC upgrades to an exclusive lock.
+    /// inter-process lock. GC upgrades to an exclusive lock. The v2 chunk
+    /// layer is active iff `MYCEL_CHUNKED=1`.
     pub fn open(root: impl Into<PathBuf>) -> Result<Self> {
+        Self::open_inner(root, Self::chunking_enabled_from_env())
+    }
+
+    /// Like [`Store::open`] but with the v2 chunk layer forced on,
+    /// regardless of the environment. Behavior is otherwise identical.
+    pub fn open_chunked(root: impl Into<PathBuf>) -> Result<Self> {
+        Self::open_inner(root, true)
+    }
+
+    fn open_inner(root: impl Into<PathBuf>, chunked: bool) -> Result<Self> {
         let root = root.into();
         for sub in ["objects", "manifests", "refs", "pins", "tmp"] {
             let p = root.join(sub);
             fs::create_dir_all(&p).map_err(|e| io_err(&p, e))?;
+        }
+        if chunked {
+            for sub in ["packs", "chunks"] {
+                let p = root.join(sub);
+                fs::create_dir_all(&p).map_err(|e| io_err(&p, e))?;
+            }
         }
         let lock_path = root.join("lock");
         let lock = fs::OpenOptions::new()
@@ -95,7 +125,16 @@ impl Store {
             .open(&lock_path)
             .map_err(|e| io_err(&lock_path, e))?;
         lock.lock_shared().map_err(|e| io_err(&lock_path, e))?;
-        Ok(Store { root, _lock: lock })
+        Ok(Store {
+            root,
+            _lock: lock,
+            chunked,
+        })
+    }
+
+    /// `MYCEL_CHUNKED=1` opts this store into the v2 chunk layer.
+    fn chunking_enabled_from_env() -> bool {
+        std::env::var("MYCEL_CHUNKED").ok().as_deref() == Some("1")
     }
 
     /// Default store location: `$MYCEL_STORE` or `~/.mycel`.
@@ -151,6 +190,9 @@ impl Store {
         let hash = hasher.finalize().to_hex().to_string();
         let dest = self.blob_path(&hash);
         if dest.exists() {
+            // v2: backfill the chunk layer for pre-v2 blobs on re-ingest
+            // (no-op as soon as the sidecar exists).
+            self.index_chunks_if_enabled(&hash, size, tmp.path())?;
             return Ok((hash, size)); // dedup hit; drop the temp file
         }
         let parent = dest.parent().unwrap();
@@ -169,7 +211,26 @@ impl Store {
             Err(e) if e.error.kind() == io::ErrorKind::AlreadyExists => {}
             Err(e) => return Err(io_err(&dest, e.error)),
         }
+        self.index_chunks_if_enabled(&hash, size, &dest)?;
         Ok((hash, size))
+    }
+
+    /// v2 chunk indexing (opt-in): cut blobs in
+    /// `[chunks::CHUNK_MIN_BLOB_SIZE, chunks::CHUNK_MAX_BLOB_SIZE]` into
+    /// content-defined chunks, store only the missing ones in a pack and
+    /// write the blob's sidecar. Purely additive — the v1 blob file is
+    /// already on disk when this runs, so readers and hardlinking never
+    /// depend on the chunk layer.
+    fn index_chunks_if_enabled(&self, blob_hash: &str, size: u64, data_file: &Path) -> Result<()> {
+        let chunkable = (chunks::CHUNK_MIN_BLOB_SIZE..=chunks::CHUNK_MAX_BLOB_SIZE).contains(&size);
+        if !self.chunked || !chunkable {
+            return Ok(());
+        }
+        if chunks::blob_chunks(&self.root, blob_hash)?.is_some() {
+            return Ok(()); // already indexed — re-ingest is a no-op
+        }
+        let data = fs::read(data_file).map_err(|e| io_err(data_file, e))?;
+        chunks::index_blob(&self.root, blob_hash, &data).map(|_| ())
     }
 
     pub fn has_blob(&self, hash: &str) -> bool {
@@ -199,6 +260,46 @@ impl Store {
             });
         }
         Ok(())
+    }
+
+    // ---- chunk layer (v2, opt-in) ----
+
+    /// Is the v2 chunk layer active on this handle? (See `chunks`.)
+    pub fn chunked(&self) -> bool {
+        self.chunked
+    }
+
+    /// Does the store hold this chunk (in any pack)? Bloom filters answer
+    /// first, pack indexes confirm — so the answer has no false positives.
+    /// Unavailable (scan failure) reports `false`: the safe direction for a
+    /// transfer is to resend.
+    pub fn has_chunk(&self, id: &ChunkId) -> bool {
+        chunks::has_chunk(&self.root, id)
+    }
+
+    /// The subset of `wanted` this store is missing — exactly the chunks a
+    /// hub push/pull would have to transfer once the protocol negotiates at
+    /// chunk granularity.
+    pub fn missing_chunks(&self, wanted: &[ChunkId]) -> Vec<ChunkId> {
+        chunks::missing_chunks(&self.root, wanted).unwrap_or_default()
+    }
+
+    /// Ordered chunk ids covering one blob (`None` if it has no sidecar:
+    /// too small, or ingested before chunking was enabled).
+    pub fn blob_chunks(&self, blob_hash: &str) -> Result<Option<Vec<ChunkId>>> {
+        chunks::blob_chunks(&self.root, blob_hash)
+    }
+
+    /// Rebuild a chunked blob from its packs; the result is verified
+    /// against the blob hash (the round-trip guarantee).
+    pub fn reassemble_blob(&self, blob_hash: &str) -> Result<Vec<u8>> {
+        chunks::reassemble(&self.root, blob_hash)
+    }
+
+    /// Physical statistics of the chunk layer (packs, unique chunks,
+    /// sidecars) for reporting and measurements.
+    pub fn chunk_stats(&self) -> Result<ChunkStats> {
+        chunks::chunk_stats(&self.root)
     }
 
     // ---- manifests ----
@@ -382,8 +483,10 @@ impl Store {
         fs2::FileExt::unlock(&self._lock).map_err(|e| io_err(&lock_path, e))
     }
 
-    /// Delete every blob not referenced by any stored manifest.
-    /// Returns (blobs deleted, bytes freed).
+    /// Delete every blob not referenced by any stored manifest, then sweep
+    /// the v2 chunk layer (sidecars of dead blobs, packs referenced by no
+    /// surviving sidecar). Returns (deleted files, bytes freed) — the count
+    /// covers blob objects and swept chunk files, the bytes cover both.
     ///
     /// Waits up to ~10 s for exclusive store access, then fails with
     /// [`StoreError::Busy`] instead of blocking forever (an in-flight
@@ -452,6 +555,11 @@ impl Store {
                 }
             }
         }
+        // v2 chunk layer: sidecars of dead blobs go first, then every pack
+        // no surviving sidecar references.
+        let (extra_deleted, extra_freed) = chunks::gc_sweep(&self.root, &live)?;
+        deleted += extra_deleted;
+        freed += extra_freed;
         self._lock.unlock().map_err(|e| io_err(&lock_path, e))?;
         self._lock
             .lock_shared()
@@ -608,5 +716,35 @@ mod tests {
         store.remove_manifest(&id).unwrap();
         assert!(store.resolve_ref("gone:1").unwrap().is_none());
         assert!(store.get_manifest(&id).is_err());
+    }
+
+    #[test]
+    fn chunked_flag_follows_constructor() {
+        let dir = tempfile::tempdir().unwrap();
+        let plain = Store::open_inner(dir.path().join("a"), false).unwrap();
+        assert!(!plain.chunked());
+        assert!(!plain.root().join("packs").exists());
+        let chunked = Store::open_chunked(dir.path().join("b")).unwrap();
+        assert!(chunked.chunked());
+        assert!(chunked.root().join("packs").is_dir());
+    }
+
+    #[test]
+    fn dedup_hit_backfills_chunk_sidecar_for_v1_blob() {
+        // A big blob stored with chunking off (v1) is re-put with chunking
+        // on: the blob dedups as before, and the sidecar appears (upgrade
+        // path for existing stores).
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("s");
+        let v1 = Store::open_inner(&root, false).unwrap();
+        let data = vec![5u8; 128 * 1024];
+        let (hash, _) = v1.put_blob(&mut &data[..]).unwrap();
+        assert!(v1.blob_chunks(&hash).unwrap().is_none());
+        drop(v1);
+        let v2 = Store::open_chunked(&root).unwrap();
+        let (h2, _) = v2.put_blob(&mut &data[..]).unwrap();
+        assert_eq!(hash, h2);
+        assert!(v2.blob_chunks(&hash).unwrap().is_some());
+        assert_eq!(v2.reassemble_blob(&hash).unwrap(), data);
     }
 }

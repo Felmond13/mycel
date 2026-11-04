@@ -7,8 +7,10 @@ license.workspace = true
 
 [dependencies]
 myc-manifest = { workspace = true }
+myc-chunk = { workspace = true }
 blake3 = { workspace = true }
 hex = { workspace = true }
+zstd = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
