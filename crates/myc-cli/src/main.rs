@@ -112,6 +112,11 @@ enum Command {
         /// `myc doctor` for its readiness)
         #[arg(long)]
         engine: Option<String>,
+        /// Disable the Firecracker snapshot cache of the kvm-microvm
+        /// engine: every run cold-boots through Cloud Hypervisor
+        /// (equivalent to MYCEL_SNAPSHOT_CACHE=0)
+        #[arg(long)]
+        no_snapshot_cache: bool,
     },
     /// Build an image natively from a mycel-build.toml (no Dockerfile, no daemon)
     Build {
@@ -345,6 +350,7 @@ fn main() {
             run_dir,
             map_user,
             engine,
+            no_snapshot_cache,
         } => {
             // The legacy --isolated-network flag meant "own namespace, no
             // connectivity" — exactly what --net none does today.
@@ -386,6 +392,7 @@ fn main() {
                         keep_rootfs,
                         run_dir,
                         map_user,
+                        no_snapshot_cache,
                     },
                 )
             }

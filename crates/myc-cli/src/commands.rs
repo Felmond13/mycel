@@ -260,6 +260,9 @@ pub struct RunArgs {
     /// Execution engine: `None`/`auto` = native namespaces (default),
     /// `kvm-microvm` = real VM with its own kernel (see docs/isolation-engines.md).
     pub engine: Option<String>,
+    /// Disable the Firecracker snapshot cache (`--no-snapshot-cache`):
+    /// kvm-microvm runs always cold-boot through Cloud Hypervisor.
+    pub no_snapshot_cache: bool,
 }
 
 impl Default for RunArgs {
@@ -277,6 +280,7 @@ impl Default for RunArgs {
             run_dir: None,
             map_user: None,
             engine: None,
+            no_snapshot_cache: false,
         }
     }
 }
@@ -471,6 +475,7 @@ fn run_kvm_engine(root: &Path, reference: &str, args: RunArgs) -> Result<i32> {
         isolated_network: args.net == "none",
         keep_rootfs: args.keep_rootfs,
         publish,
+        no_snapshot_cache: args.no_snapshot_cache,
     };
     let engine = myc_backend::kvm::KvmMicroVm::from_env();
     engine
@@ -816,6 +821,7 @@ pub fn up(root: &Path, file: &Path, net: Option<&str>) -> Result<i32> {
             keep_rootfs: false,
             run_dir: None,
             map_user: None,
+            no_snapshot_cache: false,
         };
         handles.push(std::thread::spawn(move || {
             let code = match run(&store_root, &image, args) {
