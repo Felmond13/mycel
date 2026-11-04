@@ -395,15 +395,16 @@ impl ExecBackend for Wsl2 {
     }
 }
 
-/// Forward hub-related environment variables into WSL via WSLENV, so
-/// `myc.exe push --to …` and `$MYCEL_HUB` behave as expected inside the twin.
+/// Forward hub- and update-related environment variables into WSL via
+/// WSLENV, so `myc.exe push --to …`, `$MYCEL_HUB` and `$MYCEL_UPDATE_API`
+/// behave as expected inside the twin.
 fn forward_hub_env(cmd: &mut Command) {
     let mut wslenv: Vec<String> = std::env::var("WSLENV")
         .ok()
         .filter(|v| !v.is_empty())
         .map(|v| v.split(':').map(str::to_string).collect())
         .unwrap_or_default();
-    for var in ["MYCEL_HUB", "MYCEL_HUB_TOKEN"] {
+    for var in ["MYCEL_HUB", "MYCEL_HUB_TOKEN", "MYCEL_UPDATE_API"] {
         if std::env::var_os(var).is_some() && !wslenv.iter().any(|e| e == var) {
             wslenv.push(var.to_string());
         }

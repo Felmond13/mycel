@@ -73,6 +73,11 @@ pub fn preflight() -> Preflight {
         None if !forwarded.is_empty() => Preflight::Native(args),
         // Windows-aware doctor.
         Some("doctor") => Preflight::Exit(doctor()),
+        // `myc update`: the Linux twin inside WSL is the real engine, so the
+        // default run updates IT (proxied — the twin swaps its own
+        // ~/.mycel-bin/myc atomically); `--host` (or --help) stays native to
+        // update myc.exe itself (see `update` below).
+        Some("update") => Preflight::Exit(update(&forwarded)),
         // Guided first-run setup: WSL2 + Ubuntu install, reboot resumption,
         // twin verification (host-side, never proxied).
         Some("setup-windows") => Preflight::Exit(myc_backend::wsl::setup_windows()),
@@ -232,6 +237,21 @@ fn doctor() -> i32 {
             println!("      {}", paint.yellow(&format!("fix: {fix}")));
         }
     }
+    // myc.exe's own release freshness (cached 24 h like the Linux doctor —
+    // the twin's doctor, proxied below, reports its own line).
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let line = crate::update::doctor_line(
+        env!("CARGO_PKG_VERSION"),
+        crate::update::latest_known(&myc_store::Store::default_root(), now),
+    );
+    if line.starts_with("update available") {
+        println!("{}", paint.yellow(&line));
+    } else {
+        println!("{}", paint.dim(&line));
+    }
     println!();
     if !report.available {
         println!(
@@ -251,4 +271,35 @@ fn doctor() -> i32 {
             1
         }
     }
+}
+
+/// `myc update` on Windows (intercepted by the preflight, never proxied
+/// verbatim). Default: the Linux twin inside WSL — the real engine —
+/// updates itself (proxied; it swaps its own `~/.mycel-bin/myc` atomically
+/// after sha256-verifying the published asset). `myc update --host` (routed
+/// natively by [`crate::update::route_windows_update`]) updates myc.exe
+/// instead: the verified new build is staged as `myc-new.exe` beside the
+/// running one, with the exact command to finish the swap — a running .exe
+/// cannot replace itself on Windows.
+fn update(args: &[OsString]) -> i32 {
+    if crate::update::route_windows_update(args) == crate::update::UpdateRoute::Native {
+        return match crate::update::run(true) {
+            Ok(code) => code,
+            Err(e) => {
+                eprintln!("myc: error: {e:#}");
+                1
+            }
+        };
+    }
+    let code = proxy(&[OsString::from("update")]);
+    println!();
+    println!("myc.exe itself: run `myc update --host` — it downloads the matching");
+    println!("Windows release, verifies it against its .sha256 sidecar and stages it");
+    println!("as myc-new.exe beside this one, with the exact command to swap them.");
+    println!(
+        "note: when this myc.exe embeds a twin (release builds), the next proxied \
+         command re-provisions the WSL twin from that embedded copy — updating \
+         myc.exe is what makes the update stick."
+    );
+    code
 }

@@ -24,6 +24,10 @@ anyhow = { workspace = true }
 serde_json = { workspace = true }
 clap = { workspace = true }
 tempfile = { workspace = true }
+# `myc update` / doctor update-check: release API + sha256 sidecar verify.
+reqwest = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
 
 # FUSE-based lazy streaming is Linux-only (fuser does not build elsewhere).
 [target.'cfg(target_os = "linux")'.dependencies]

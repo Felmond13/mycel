@@ -8,6 +8,7 @@ mod commands;
 mod deploy_commands;
 mod hub_commands;
 mod ui;
+mod update;
 #[cfg(windows)]
 mod win;
 
@@ -223,6 +224,22 @@ enum Command {
     },
     /// Check that this machine can ingest and run environments
     Doctor,
+    /// Update the myc binary to the latest release (sha256-verified)
+    ///
+    /// Checks GitHub for the newest vX.Y.Z, downloads this platform's asset
+    /// plus its published .sha256 sidecar, verifies it, and swaps it in —
+    /// atomically on Linux (`<exe>.new` renamed over the running binary).
+    /// On Windows `myc update` instead updates the Linux twin inside WSL
+    /// (the real engine, proxied), and `myc update --host` updates myc.exe
+    /// itself: a running .exe cannot be replaced, so the new one is staged
+    /// as `myc-new.exe` beside the current one with the exact command to
+    /// finish the swap. `myc doctor` shows when a newer release exists.
+    Update {
+        /// Windows only: update myc.exe itself (staged as myc-new.exe)
+        /// instead of the WSL twin. No effect on Linux.
+        #[arg(long)]
+        host: bool,
+    },
     /// Manage named volumes (persistent app data under the store)
     #[command(subcommand)]
     Volume(VolumeCommand),
@@ -435,6 +452,7 @@ fn main() {
         Command::Sbom { reference } => commands::sbom(&store_root, &reference),
         Command::Shell { image } => commands::shell(&store_root, &image),
         Command::Doctor => commands::doctor(&store_root),
+        Command::Update { host } => update::run(host),
         Command::Volume(VolumeCommand::Ls) => commands::volume_ls(&store_root),
         Command::Volume(VolumeCommand::Inspect { name }) => {
             commands::volume_inspect(&store_root, &name)

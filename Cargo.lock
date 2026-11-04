@@ -933,6 +933,7 @@ version = "0.3.0"
 dependencies = [
  "anyhow",
  "clap",
+ "hex",
  "myc-backend",
  "myc-build",
  "myc-compose",
@@ -944,7 +945,9 @@ dependencies = [
  "myc-run",
  "myc-store",
  "myc-web",
+ "reqwest",
  "serde_json",
+ "sha2",
  "tempfile",
 ]
 
