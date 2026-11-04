@@ -257,6 +257,9 @@ pub struct RunArgs {
     /// non-root uid and skip their chown/su-exec paths, which cannot work
     /// in a single-uid user namespace.
     pub map_user: Option<String>,
+    /// Execution engine: `None`/`auto` = native namespaces (default),
+    /// `kvm-microvm` = real VM with its own kernel (see docs/isolation-engines.md).
+    pub engine: Option<String>,
 }
 
 impl Default for RunArgs {
@@ -273,6 +276,7 @@ impl Default for RunArgs {
             keep_rootfs: false,
             run_dir: None,
             map_user: None,
+            engine: None,
         }
     }
 }
@@ -364,6 +368,16 @@ pub fn resolve_mounts(
 }
 
 pub fn run(root: &Path, reference: &str, args: RunArgs) -> Result<i32> {
+    // Engine selection: the default stays native namespaces (the strongest
+    // *default-safe* tier); kvm-microvm is opt-in per run until it becomes
+    // the Linux default (docs/isolation-engines.md).
+    match args.engine.as_deref() {
+        None | Some("auto") | Some("native-namespaces") => {}
+        Some("kvm-microvm") => return run_kvm_engine(root, reference, args),
+        Some(other) => {
+            bail!("unknown engine '{other}' (expected auto, native-namespaces or kvm-microvm)")
+        }
+    }
     let store = open_store(root)?;
     let (id, manifest) = resolve_or_ingest(&store, root, reference)?;
 
@@ -416,6 +430,46 @@ pub fn run(root: &Path, reference: &str, args: RunArgs) -> Result<i32> {
         eprintln!("rootfs kept at {}", kept.display());
     }
     Ok(code)
+}
+
+/// `myc run --engine kvm-microvm`: same CLI surface, executed inside a real
+/// microVM with its own kernel. The reference is resolved/ingested first so
+/// an unknown name behaves exactly like a native run.
+fn run_kvm_engine(root: &Path, reference: &str, args: RunArgs) -> Result<i32> {
+    use myc_backend::ExecBackend;
+
+    if args.join_net.is_some() {
+        bail!("--join-net is not supported by the kvm-microvm engine (pods are namespaces)");
+    }
+    if args.run_dir.is_some() {
+        bail!("--run-dir is not supported by the kvm-microvm engine");
+    }
+    let store = open_store(root)?;
+    let (id, _manifest) = resolve_or_ingest(&store, root, reference)?;
+    let publish: Vec<(u16, u16)> = args
+        .publish
+        .iter()
+        .map(|s| parse_publish(s).map(|p| (p.host, p.container)))
+        .collect::<Result<_>>()?;
+    let request = myc_backend::RunRequest {
+        reference: id,
+        command: args.command,
+        env: args.env,
+        binds: args.binds,
+        hostname: args.hostname,
+        workdir: args.workdir,
+        map_user: args.map_user,
+        // --net none keeps the VM off the network entirely; `host` and
+        // `isolated` are both emulated by publishing ports (a VM cannot
+        // share the host network namespace) — docs/isolation-engines.md.
+        isolated_network: args.net == "none",
+        keep_rootfs: args.keep_rootfs,
+        publish,
+    };
+    let engine = myc_backend::kvm::KvmMicroVm::from_env();
+    engine
+        .run(root, &request)
+        .map_err(|e| anyhow::anyhow!("kvm-microvm engine: {e}"))
 }
 
 pub fn ls(root: &Path, paths: bool) -> Result<i32> {
@@ -737,6 +791,7 @@ pub fn up(root: &Path, file: &Path, net: Option<&str>) -> Result<i32> {
         let image = svc.image.clone();
         let service_name = name.clone();
         let args = RunArgs {
+            engine: None,
             command: svc.command.clone(),
             env: svc.env.clone(),
             binds: svc

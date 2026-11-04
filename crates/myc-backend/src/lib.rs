@@ -15,6 +15,9 @@
 pub mod kvm;
 #[cfg(target_os = "linux")]
 pub mod native;
+/// Userland TCP relay for published ports (used by [`kvm`]; generic).
+#[cfg(target_os = "linux")]
+pub mod portproxy;
 #[cfg(target_os = "macos")]
 pub mod vm;
 #[cfg(windows)]
@@ -27,7 +30,7 @@ pub mod wsl;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EngineKind {
     /// Real virtual machine, own kernel (Linux + KVM). Strongest isolation;
-    /// prototype scope today (see [`kvm`]).
+    /// carries the full `RunRequest` surface (see [`kvm`]).
     KvmMicroVm,
     /// Real virtual machine via Hypervisor.framework (macOS plan,
     /// `docs/desktop-architecture.md`).
@@ -58,9 +61,13 @@ impl EngineKind {
     /// What this tier does *not* give you, shown next to the engine.
     pub fn degraded_features(self) -> &'static [&'static str] {
         match self {
-            Self::KvmMicroVm | Self::HypervisorFramework => {
-                &["prototype: arbitrary environments not wired through the guest yet"]
-            }
+            Self::KvmMicroVm => &[
+                "published ports (-p) and the br-myc bridge need a root myc",
+                "networked VMs share one /24 bridge (253 guests, MYCEL_VM_CIDR)",
+                "--map-user ignored in v1 (workloads run as guest root)",
+                "x86_64 guests only (multi-arch not wired)",
+            ],
+            Self::HypervisorFramework => &["architecture only (see docs/desktop-architecture.md)"],
             Self::Wsl2 => &["containers execute inside the WSL2 Linux twin"],
             Self::NativeNamespaces => &[
                 "shared kernel with the host — isolation is Docker-level, not better",
@@ -92,10 +99,12 @@ pub fn detect_engines(store_root: &std::path::Path) -> Vec<EngineInfo> {
     {
         let kvm = kvm::KvmMicroVm::from_env();
         let report = kvm.probe(store_root);
+        // complete = the full production path (voie B virtiofs): arbitrary
+        // environments end to end. ext4-only hosts stay PARTIAL.
         engines.push(EngineInfo {
             kind: EngineKind::KvmMicroVm,
             available: report.available,
-            complete: false,
+            complete: report.available && kvm.engine_ready(),
         });
     }
     #[cfg(target_os = "macos")]
@@ -183,6 +192,10 @@ pub struct RunRequest {
     pub map_user: Option<String>,
     pub isolated_network: bool,
     pub keep_rootfs: bool,
+    /// Published ports `(host, container)`. Empty + non-isolated network
+    /// means "publish the manifest's exposed ports" for VM backends (a VM
+    /// cannot literally share the host network namespace).
+    pub publish: Vec<(u16, u16)>,
 }
 
 /// A strategy for executing containers on this machine.

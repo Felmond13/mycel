@@ -107,6 +107,11 @@ enum Command {
         /// of root (e.g. `--map-user 999` to run as the postgres user)
         #[arg(long)]
         map_user: Option<String>,
+        /// Execution engine: `auto` (default — native namespaces), or
+        /// `kvm-microvm` (real VM, own kernel — strongest isolation; see
+        /// `myc doctor` for its readiness)
+        #[arg(long)]
+        engine: Option<String>,
     },
     /// Build an image natively from a mycel-build.toml (no Dockerfile, no daemon)
     Build {
@@ -339,6 +344,7 @@ fn main() {
             from,
             run_dir,
             map_user,
+            engine,
         } => {
             // The legacy --isolated-network flag meant "own namespace, no
             // connectivity" — exactly what --net none does today.
@@ -372,6 +378,7 @@ fn main() {
                         env,
                         binds,
                         hostname,
+                        engine,
                         workdir,
                         net,
                         publish,

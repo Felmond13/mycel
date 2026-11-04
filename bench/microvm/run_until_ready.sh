@@ -4,8 +4,9 @@
 # Usage : run_until_ready.sh <docker|microvm> <fichier-times|/dev/null>
 #
 # docker  : conteneur Docker de la même charge statique (127.0.0.1:18080).
-# microvm : boot KVM via myc-backend/examples/boot (invité 192.168.77.2:8080,
-#           joint directement par le tap — aucun proxy userland).
+# microvm : boot KVM via myc-backend/examples/boot (invité 192.168.77.2:8080 —
+#           premier bail, déterministe — joint via le bridge br-myc, aucun
+#           proxy userland).
 set -u
 
 SCN="$1"
@@ -77,10 +78,12 @@ case "$SCN" in
     ;;
 esac
 
-# Anti-fuite : conteneur, tap, VMM — tout résidu échoue le run.
+# Anti-fuite : conteneur, tap, VMM — tout résidu échoue le run. Le motif
+# myc-[0-9] attrape les taps myc-2, myc-3… sans matcher le bridge br-myc
+# (persistant entre les runs, comme docker0 — ce n'est PAS un résidu).
 RESIDUAL=0
 if docker ps -a --format '{{.Names}}' 2>/dev/null | grep -qx bench-http; then RESIDUAL=1; fi
-if ip link 2>/dev/null | grep -q 'myc0@'; then RESIDUAL=1; fi
+if ip link 2>/dev/null | grep -Eq 'myc-[0-9]'; then RESIDUAL=1; fi
 if pgrep -f /usr/local/bin/cloud-hypervisor >/dev/null 2>&1; then RESIDUAL=1; fi
 
 if [ "$OK" -ne 1 ] || [ "$RESIDUAL" -ne 0 ]; then

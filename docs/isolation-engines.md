@@ -30,6 +30,13 @@ scratch` Docker container vs a KVM microVM booted by
 `myc-backend/examples/boot` (pinned Linux 6.12.x, virtio built in, busybox
 init, static-IP guest on a host tap — no userland proxy in Mycel's path).
 
+Network (kvm-microvm): docker0 pattern — each VM gets its own tap
+`myc-<n>` on the persistent bridge `br-myc` (which holds the subnet host
+IP) with a sequential lease, first free from `.2` — deterministic, bench
+scripts curling `192.168.77.2` keep working. N concurrent VMs per /24
+(`MYCEL_VM_CIDR`); published ports are DNAT'd per lease, rules tagged
+`myc-<n>`.
+
 Protocol: T0 = command launch → T1 = first byte of a `200` received by the
 same client loop; 5 unmeasured warmups then 30 measured runs per series,
 ABBA order (A=docker, C=microvm, C, A), medians + p95 from the raw

@@ -373,6 +373,10 @@ impl ExecBackend for Wsl2 {
         if request.isolated_network {
             args.push("--isolated-network".into());
         }
+        for (host, container) in &request.publish {
+            args.push("--publish".into());
+            args.push(format!("{host}:{container}").into());
+        }
         if request.keep_rootfs {
             args.push("--keep-rootfs".into());
         }
