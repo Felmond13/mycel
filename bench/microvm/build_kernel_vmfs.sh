@@ -77,7 +77,7 @@ fi
 cd "$VERSION"
 
 # Arbre propre (un arbre pollué casse le build hors-arbre).
-make mrproper
+make ARCH="$KARCH" mrproper
 
 # Config MINIMALE + fs invité. FUSE_FS : dépendance Kconfig dure de
 # VIRTIO_FS (fs/fuse/Kconfig : "depends on FUSE_FS") — le protocole FUSE
