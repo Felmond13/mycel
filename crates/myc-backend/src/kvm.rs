@@ -58,6 +58,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use crate::is_root;
 use crate::{BackendCheck, BackendError, BackendReport, ExecBackend, Result, RunRequest};
 use myc_store::Store;
 use std::path::Path as StoreRoot;
@@ -299,19 +300,35 @@ impl KvmMicroVm {
             .is_ok()
     }
 
-    /// True when `run()` can execute environments right now (either voie).
+    /// Where `run()` would load a guest asset from RIGHT NOW without
+    /// touching the network: the expected system location, or the
+    /// size-checked download cache. `None` → a run would have to download
+    /// it first (which an EXPLICIT `--engine kvm-microvm` still does — the
+    /// automatic default must not depend on the network).
+    fn vm_asset_source(expected: &Path, asset: &str, min_bytes: u64) -> Option<PathBuf> {
+        match locate_vm_asset(expected, &vm_assets_cache(), asset, min_bytes) {
+            AssetSource::System(path) | AssetSource::Cache(path) => Some(path),
+            AssetSource::Missing => None,
+        }
+    }
+
+    /// True when `run()` can execute environments right now (either voie),
+    /// counting guest assets present in the download cache as ready.
     fn engine_available(&self) -> bool {
         Self::kvm_usable()
             && Self::file_exists(&self.ch_bin)
             && Self::file_exists(&self.ch_remote)
-            && Self::file_exists(&self.vm_kernel)
-            && Self::file_exists(&self.vm_initramfs)
+            && Self::vm_asset_source(&self.vm_kernel, "vmlinux-vmfs", MIN_KERNEL_BYTES).is_some()
+            && Self::vm_asset_source(&self.vm_initramfs, "init-vm.cpio", MIN_INITRAMFS_BYTES)
+                .is_some()
             && (Self::file_exists(&self.virtiofsd) || Self::file_exists(&self.mkfs_ext4))
     }
 
-    /// True when the full production path is ready: engine available AND
-    /// virtiofsd present (voie B: zero copy + bind mounts). `myc doctor`
-    /// prints READY only for this; voie A alone is PARTIAL.
+    /// True when the full production path is ready offline: engine
+    /// available AND virtiofsd present (voie B: zero copy + bind mounts).
+    /// `myc doctor` prints READY only for this; voie A alone is PARTIAL.
+    /// This is what the automatic engine default keys on
+    /// (`crate::kvm_engine_complete`).
     pub fn engine_ready(&self) -> bool {
         self.engine_available() && Self::file_exists(&self.virtiofsd)
     }
@@ -740,18 +757,6 @@ fn tree_size(path: &Path) -> u64 {
         }
     }
     total
-}
-
-/// Is this process running as root? (tap creation + iptables need it).
-fn is_root() -> bool {
-    std::fs::read_to_string("/proc/self/status")
-        .ok()
-        .and_then(|s| {
-            s.lines()
-                .find(|l| l.starts_with("Uid:"))
-                .and_then(|l| l.split_whitespace().nth(1).map(|u| u == "0"))
-        })
-        .unwrap_or(false)
 }
 
 /// Delete EVERY iptables rule carrying this lease tag, across tables and
@@ -1499,8 +1504,15 @@ impl ExecBackend for KvmMicroVm {
         let kvm = Self::kvm_usable();
         let ch = Self::file_exists(&self.ch_bin);
         let remote = Self::file_exists(&self.ch_remote);
-        let vm_kernel = Self::file_exists(&self.vm_kernel);
-        let initramfs = Self::file_exists(&self.vm_initramfs);
+        // Guest assets count as present when the download cache holds a
+        // size-checked copy — that is exactly what `run()` would use, with
+        // no network involved (see vm_asset_source).
+        let vm_kernel_path =
+            Self::vm_asset_source(&self.vm_kernel, "vmlinux-vmfs", MIN_KERNEL_BYTES);
+        let initramfs_path =
+            Self::vm_asset_source(&self.vm_initramfs, "init-vm.cpio", MIN_INITRAMFS_BYTES);
+        let vm_kernel = vm_kernel_path.is_some();
+        let initramfs = initramfs_path.is_some();
         let virtiofsd = Self::file_exists(&self.virtiofsd);
         let mkfs = Self::file_exists(&self.mkfs_ext4);
         let ipt = Self::file_exists(&self.iptables);
@@ -1553,7 +1565,12 @@ impl ExecBackend for KvmMicroVm {
             BackendCheck {
                 name: "engine kernel".into(),
                 ok: vm_kernel,
-                detail: format!("{} (VIRTIO_FS + EXT4 built in)", self.vm_kernel.display()),
+                detail: format!(
+                    "{} (VIRTIO_FS + EXT4 built in)",
+                    vm_kernel_path
+                        .unwrap_or_else(|| self.vm_kernel.clone())
+                        .display()
+                ),
                 fix: (!vm_kernel).then(|| {
                     "auto-downloaded on the first kvm-microvm run; or build it: \
                      bench/microvm/build_kernel_vmfs.sh && sudo bench/microvm/mkinit-vm.sh --install"
@@ -1563,7 +1580,12 @@ impl ExecBackend for KvmMicroVm {
             BackendCheck {
                 name: "engine initramfs".into(),
                 ok: initramfs,
-                detail: format!("{} (generic guest init)", self.vm_initramfs.display()),
+                detail: format!(
+                    "{} (generic guest init)",
+                    initramfs_path
+                        .unwrap_or_else(|| self.vm_initramfs.clone())
+                        .display()
+                ),
                 fix: (!initramfs).then(|| {
                     "auto-downloaded on the first kvm-microvm run; or: sudo \
                      bench/microvm/mkinit-vm.sh --install (or install.sh --with-vm)"
