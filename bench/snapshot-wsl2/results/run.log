@@ -1,0 +1,41 @@
+[fc-kit] VMM : /home/nboukadoum-ext/mycel/bench/snapshot-wsl2/.tools/firecracker (Firecracker v1.17.0)
+[fc-kit] chemin restore : api
+
+=== BOOT — 5 boots à froid (T0 -> T1 : 1er octet 200) ===
+[fc-kit] boot 1 : 330906999 ns
+[fc-kit] boot 2 : 520837379 ns
+[fc-kit] boot 3 : 389035432 ns
+[fc-kit] boot 4 : 1413003541 ns
+[fc-kit] boot 5 : 336639544 ns
+[fc-kit] boot : n=5 median_ms=389.035 p95_ms=1413.004 mean_ms=598.085 cv_pct=69.1
+
+=== SNAPSHOT — boot, Pause, PUT /snapshot/create (Full) vers /tmp/myc-fc-wsl2.z3j6E1/snap ===
+[fc-kit] snapshot créé en 614 ms (détail : results/snapshot-info.txt)
+
+=== RESTORE — 10 restores (mode=api), vivacité par battement console ===
+[fc-kit] restore 1/10 : class=ok
+[fc-kit] restore 2/10 : class=ok
+[fc-kit] restore 3/10 : class=ok
+[fc-kit] restore 4/10 : class=ok
+[fc-kit] restore 5/10 : class=ok
+[fc-kit] restore 6/10 : class=ok
+[fc-kit] restore 7/10 : class=ok
+[fc-kit] restore 8/10 : class=ok
+[fc-kit] restore 9/10 : class=ok
+[fc-kit] restore 10/10 : class=ok
+
+=== VERDICT ===
+=== Mycel snapshot-wsl2 (Firecracker v1.17.0) — verdict (Wed Nov  4 03:01:16 UTC 2026) ===
+hôte : 6.18.54.1-microsoft-standard-WSL2 — 11th Gen Intel(R) Core(TM) i5-1145G7 @ 2.60GHz
+
+Boot à froid Firecracker sous WSL2 :
+n=5 median_ms=389.035 p95_ms=1413.004 mean_ms=598.085 cv_pct=69.1
+
+snapshot_creation_ms=614
+mem_size_mib=512
+
+Restore (10 essais, mode=api) :
+  ok=10 inert=0 autres=0
+  latence T0->200 : n=10 median_ms=91.243 p95_ms=160.867 mean_ms=99.847 cv_pct=23.9
+
+VERDICT : Firecracker restore VIVANT sous WSL2 — le chemin snapshot Windows existe (chiffres ci-dessus, n=10 vivants).

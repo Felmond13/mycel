@@ -1,0 +1,9 @@
+snapshot_dir=/tmp/myc-fc-wsl2.z3j6E1/snap
+snapshot_creation_ms=614
+mem_size_mib=512
+files:
+total 524304
+drwxr-xr-x 2 root root        80 Nov  4 04:01 .
+drwx------ 9 root root       180 Nov  4 04:00 ..
+-rw-r--r-- 1 root root 536870912 Nov  4 04:01 fc.mem
+-rw-r--r-- 1 root root     13886 Nov  4 04:01 fc.snap

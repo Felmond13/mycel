@@ -1,0 +1,14 @@
+=== Mycel snapshot-wsl2 (Firecracker v1.17.0) — verdict (Wed Nov  4 03:01:16 UTC 2026) ===
+hôte : 6.18.54.1-microsoft-standard-WSL2 — 11th Gen Intel(R) Core(TM) i5-1145G7 @ 2.60GHz
+
+Boot à froid Firecracker sous WSL2 :
+n=5 median_ms=389.035 p95_ms=1413.004 mean_ms=598.085 cv_pct=69.1
+
+snapshot_creation_ms=614
+mem_size_mib=512
+
+Restore (10 essais, mode=api) :
+  ok=10 inert=0 autres=0
+  latence T0->200 : n=10 median_ms=91.243 p95_ms=160.867 mean_ms=99.847 cv_pct=23.9
+
+VERDICT : Firecracker restore VIVANT sous WSL2 — le chemin snapshot Windows existe (chiffres ci-dessus, n=10 vivants).

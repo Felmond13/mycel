@@ -1,0 +1,17 @@
+=== Mycel warm-pool kit — verdict (Wed Nov  4 03:05:17 UTC 2026) ===
+hôte : 6.18.54.1-microsoft-standard-WSL2 — 11th Gen Intel(R) Core(TM) i5-1145G7 @ 2.60GHz
+noyau : vmlinux-slim — initramfs : rootfs-pool.cpio
+
+Boot À FROID (n=30, T0 lancement -> T1 1er octet 200) :
+  n=30 median_ms=299.462 p95_ms=1431.424 mean_ms=621.128 cv_pct=83.1
+HANDOFF pool chaud (n=30, POOL_SIZE=3, VMs prêtes > 5 s, T0 curl -> T1 200) :
+  n=30 median_ms=28.054 p95_ms=61.242 mean_ms=34.597 cv_pct=40.2
+
+accélération médiane : x10.7 (cold 299.462 ms -> handoff 28.054 ms)
+
+Limites honnêtes du pool :
+  - 3 invités prêts pour 3 VMs résidentes (1 prêt par VM) ; le
+    re-remplissage est un boot à froid EN TÂCHE DE FOND (coût = série cold ci-dessus)
+  - mémoire résidente : 3 x 512M pendant toute la vie du pool
+  - marche partout (processes + taps only) : KVM natif, WSL2, et a priori tout
+    hyperviseur qui boote la microVM — aucune dépendance au save/restore vCPU

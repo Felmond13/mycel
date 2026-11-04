@@ -1,0 +1,37 @@
+
+=== Cloud Hypervisor v54.0 ===
+[pool] VMM : /usr/local/bin/cloud-hypervisor (cloud-hypervisor v54.0)
+initramfs pool : /home/nboukadoum-ext/mycel/bench/warm-pool/assets/rootfs-pool.cpio (7016448 octets)
+6cf7c5414d09ae82541aa33f7ec04329e1f3b6a7a1e966475246d4d693dfade9  /home/nboukadoum-ext/mycel/bench/warm-pool/../microvm/assets/benchhttp
+baa847a2339b2c9805b62f669a4a0d6fb2c07a7407132ba11c284eacabce801a  /home/nboukadoum-ext/mycel/bench/warm-pool/assets/rootfs-pool.cpio
+
+=== COLD — 5 échauffements + 30 boots à froid (T0 lancement -> T1 1er octet 200) ===
+[pool] cold : n=30 median_ms=299.462 p95_ms=1431.424 mean_ms=621.128 cv_pct=83.1
+
+=== POOL — pré-boot de 3 VMs (taps mycP0-2, subnets 192.168.8.0-82.0/24) ===
+[pool] VM 0 prête (192.168.80.2, pid 60447)
+[pool] VM 1 prête (192.168.81.2, pid 60484)
+[pool] VM 2 prête (192.168.82.2, pid 60531)
+[pool] attente : plus jeune VM < 5 s d'âge...
+
+=== HANDOFF — 30 handoffs round-robin (T0 curl déclenché -> T1 200 reçu) ===
+[pool] handoff : n=30 median_ms=28.054 p95_ms=61.242 mean_ms=34.597 cv_pct=40.2
+
+=== VERDICT ===
+=== Mycel warm-pool kit — verdict (Wed Nov  4 03:05:17 UTC 2026) ===
+hôte : 6.18.54.1-microsoft-standard-WSL2 — 11th Gen Intel(R) Core(TM) i5-1145G7 @ 2.60GHz
+noyau : vmlinux-slim — initramfs : rootfs-pool.cpio
+
+Boot À FROID (n=30, T0 lancement -> T1 1er octet 200) :
+  n=30 median_ms=299.462 p95_ms=1431.424 mean_ms=621.128 cv_pct=83.1
+HANDOFF pool chaud (n=30, POOL_SIZE=3, VMs prêtes > 5 s, T0 curl -> T1 200) :
+  n=30 median_ms=28.054 p95_ms=61.242 mean_ms=34.597 cv_pct=40.2
+
+accélération médiane : x10.7 (cold 299.462 ms -> handoff 28.054 ms)
+
+Limites honnêtes du pool :
+  - 3 invités prêts pour 3 VMs résidentes (1 prêt par VM) ; le
+    re-remplissage est un boot à froid EN TÂCHE DE FOND (coût = série cold ci-dessus)
+  - mémoire résidente : 3 x 512M pendant toute la vie du pool
+  - marche partout (processes + taps only) : KVM natif, WSL2, et a priori tout
+    hyperviseur qui boote la microVM — aucune dépendance au save/restore vCPU
