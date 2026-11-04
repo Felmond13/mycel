@@ -18,7 +18,12 @@ serde_json = { workspace = true }
 # the normal path instead of leaking the VMM. "termination" = also trap
 # SIGTERM, not just Ctrl-C.
 ctrlc = { workspace = true, features = ["termination"] }
-
-[target.'cfg(windows)'.dependencies]
+# Guest asset auto-provision (kvm.rs): one-shot downloads of vmlinux-vmfs /
+# init-vm.cpio from GitHub Releases on binary installs. Blocking client on
+# purpose — the engine is synchronous (run on a dedicated thread when the
+# caller may be async).
+reqwest = { workspace = true }
+# sha256 of downloaded assets against the published .sha256 sidecars (also
+# used on Windows to check the embedded Linux twin).
 sha2 = { workspace = true }
 hex = { workspace = true }

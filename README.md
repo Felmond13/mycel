@@ -184,7 +184,36 @@ services and one-shot commands.
 
 ## Install
 
-Requires Linux (or WSL2 on Windows) and Rust stable.
+**One command (Linux x86_64 — WSL2 included):**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Felmond13/mycel/main/scripts/install.sh | sh
+```
+
+The script detects the platform, downloads `myc-linux-x86_64` from the
+[latest release](https://github.com/Felmond13/mycel/releases) into
+`~/.local/bin` (`/usr/local/bin` when run as root) and tells you what to do
+when that directory is not on your `PATH`. It finishes with `myc doctor`.
+Useful flags: `--version vX.Y.Z` pins a release, `--with-vm` also installs
+the microVM guest assets (below).
+
+**Direct download** — grab a binary from
+[Releases](https://github.com/Felmond13/mycel/releases):
+`myc-linux-x86_64` (Linux, glibc — runs on current distros and WSL2) and
+`myc-windows-x86_64.exe` (Windows — self-contained, embeds its own Linux
+twin). Sources stay public (BUSL-1.1); releases are prebuilt binaries, the
+client never compiles anything.
+
+**KVM microVM engine (optional, auto-provisioned).** The guest kernel and
+initramfs (`vmlinux-vmfs`, `init-vm.cpio`) are release assets too. On the
+first `myc run --engine kvm-microvm`, any missing asset is downloaded once
+into `~/.mycel/vm-assets/` (sha256-verified when the release ships `.sha256`
+sidecars); `install.sh --with-vm` pre-installs them into
+`/usr/local/share/mycel/` instead. `cloud-hypervisor` and `virtiofsd`
+themselves still come from your distro — `myc doctor` lists every piece
+with its fix.
+
+**From source** (Linux or WSL2, Rust stable):
 
 ```bash
 cargo build --release          # produces target/release/myc (~7 MB, UI included)

@@ -899,6 +899,7 @@ dependencies = [
  "myc-manifest",
  "myc-run",
  "myc-store",
+ "reqwest",
  "serde_json",
  "sha2",
  "tempfile",

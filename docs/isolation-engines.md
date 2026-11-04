@@ -62,6 +62,12 @@ normalized), and its exit code is written as raw bytes at offset 0 of a
 scratch virtio-blk disk — the host reads it right after the VMM exits, so
 propagation works on both voies with no filesystem needed.
 
+Distribution: `vmlinux-vmfs` + `init-vm.cpio` ship as GitHub release
+assets — `install.sh --with-vm` pre-installs them into
+`/usr/local/share/mycel/`, and the engine auto-downloads a missing asset
+into `~/.mycel/vm-assets/` on first use (sha256-checked when the release
+ships sidecars); `cloud-hypervisor`/`virtiofsd` remain distro packages.
+
 Network: a VM cannot share the host network namespace, so "host" mode is
 emulated — every port the image exposes (or `-p`) is published. External
 clients go through `nat PREROUTING` DNAT + FORWARD rules tagged `myc-<n>`

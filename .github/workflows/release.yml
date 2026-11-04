@@ -46,6 +46,74 @@ jobs:
         with:
           files: myc-linux-x86_64
 
+  # TODO(aarch64): no prebuilt Linux aarch64 binary yet. A cross build needs
+  # more than `cargo build --target aarch64-unknown-linux-gnu` (cross glibc
+  # toolchain + linker, and myc-run's nix/libc mount code untested there) —
+  # revisit with a native arm64 runner or a proper cross image.
+
+  assets-microvm:
+    name: microVM guest assets (kernel + initramfs)
+    runs-on: ubuntu-latest
+    # Guest assets consumed by the kvm-microvm engine and by
+    # scripts/install.sh --with-vm. Independent of the binary jobs — runs in
+    # parallel with them. Dependencies read off the scripts themselves:
+    # - build_kernel_vmfs.sh: gcc/make (build-essential), flex, bison, bc,
+    #   libelf-dev (objtool), libssl-dev, curl/tar/xz (runner base image).
+    # - mkinit-vm.sh: busybox at /usr/bin/busybox (busybox-static), cpio.
+    #   No Rust involved, so no musl/gcc-cross needed here.
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential flex bison bc libelf-dev libssl-dev cpio busybox-static xz-utils
+
+      - name: Build guest kernel (vmlinux-vmfs)
+        run: |
+          # mkinit-vm.sh is committed 0644 — exec bit restored here.
+          chmod +x bench/microvm/build_kernel_vmfs.sh bench/microvm/mkinit-vm.sh
+          bench/microvm/build_kernel_vmfs.sh
+
+      - name: Build guest initramfs (init-vm.cpio)
+        run: bench/microvm/mkinit-vm.sh
+
+      - name: sha256 sidecars + assets README
+        run: |
+          cd bench/microvm/assets
+          sha256sum vmlinux-vmfs > vmlinux-vmfs.sha256
+          sha256sum init-vm.cpio > init-vm.cpio.sha256
+          cat > README-assets.txt <<'EOF'
+          Mycel KVM microVM guest assets
+          ==============================
+
+          vmlinux-vmfs   guest kernel: minimal Linux 6.12.x with VIRTIO_FS +
+                         FUSE_FS + EXT4_FS + OVERLAY_FS built in (built from
+                         bench/microvm/build_kernel_vmfs.sh, sources public).
+          init-vm.cpio   generic guest initramfs (busybox + /init stage 1,
+                         built from bench/microvm/mkinit-vm.sh).
+
+          Install into /usr/local/share/mycel/ (the engine's default paths):
+              curl -fsSL https://raw.githubusercontent.com/Felmond13/mycel/main/scripts/install.sh | sh -s -- --with-vm
+          `myc` also auto-downloads both files into ~/.mycel/vm-assets/ on
+          the first kvm-microvm run when they are missing.
+
+          Verify with sha256sum -c <file>.sha256 (each sidecar sits next to
+          its asset; sha256 verified by the installer and by `myc` itself).
+          EOF
+          ls -l vmlinux-vmfs init-vm.cpio *.sha256 README-assets.txt
+
+      - name: Attach to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            bench/microvm/assets/vmlinux-vmfs
+            bench/microvm/assets/vmlinux-vmfs.sha256
+            bench/microvm/assets/init-vm.cpio
+            bench/microvm/assets/init-vm.cpio.sha256
+            bench/microvm/assets/README-assets.txt
+
   windows:
     name: Windows x86_64 (embedded Linux twin)
     runs-on: windows-latest
