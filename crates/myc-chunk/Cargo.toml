@@ -1,0 +1,9 @@
+[package]
+name = "myc-chunk"
+description = "Content-defined chunking for block-level deduplication"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+blake3 = { workspace = true }

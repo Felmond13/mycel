@@ -12,6 +12,7 @@ members = [
     "crates/myc-lazy",
     "crates/myc-build",
     "crates/myc-backend",
+    "crates/myc-chunk",
     "crates/myc-cli",
 ]
 
@@ -60,6 +61,7 @@ myc-hub = { path = "crates/myc-hub" }
 myc-lazy = { path = "crates/myc-lazy" }
 myc-build = { path = "crates/myc-build" }
 myc-backend = { path = "crates/myc-backend" }
+myc-chunk = { path = "crates/myc-chunk" }
 
 [profile.release]
 lto = "thin"
