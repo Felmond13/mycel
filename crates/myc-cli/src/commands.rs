@@ -1112,6 +1112,23 @@ pub fn doctor(root: &Path) -> Result<i32> {
         }
     }
     println!();
+    // Release freshness: non-blocking (5 s cap), cached for 24 h under
+    // <store>/update-check.json so an offline doctor stays instant. The only
+    // automatic update check in myc — everything else is user-initiated.
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let line = crate::update::doctor_line(
+        env!("CARGO_PKG_VERSION"),
+        crate::update::latest_known(root, now),
+    );
+    if line.starts_with("update available") {
+        println!("{}", paint.yellow(&line));
+    } else {
+        println!("{}", paint.dim(&line));
+    }
+    println!();
     // Isolation engines, strongest first — the choice is automatic, never a
     // mystery (docs/isolation-engines.md). READY = runs everything, PROTO =
     // works but only the prototype workload, off = not usable here.
