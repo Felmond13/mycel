@@ -90,3 +90,94 @@ cd bench/microvm
 ./build_kernel.sh && ./mkinitramfs.sh && ./mkimage.sh
 sudo ./run.sh
 ```
+
+## Campaign v3 — outlier fix + slim kernel
+
+Two changes, measured separately, same protocol as v2 (root, ABBA,
+n = 30/series, hyperfine, same machine, 2026-11-04, tree at `4daf49d`
++ these changes):
+
+1. **ICMP warm-up (kills the ~9 s outlier).** The guest *kernel* answers
+   ICMP echo as soon as eth0 has its IP — no userspace needed. The bench
+   (`run_until_ready.sh`, microvm branch) now streams one ICMP echo every
+   20 ms (iputils 20250605: `-W` is in whole seconds, so one-shot failed
+   pings would block a full second — hence a continuous stream + `grep
+   -m1`, first reply in ~20 ms) and only sends the first TCP SYN after
+   the first ICMP reply. A SYN sent before eth0 is up is silently dropped
+   (permanent ARP entry) and the SYN backoff (~1+2+4 s) was the v2
+   outlier. T0 is unchanged (launch), the warm-up runs *inside* the
+   measured T0→T1 window. `KvmMicroVm::wait_ready` (kvm.rs) got the same
+   ICMP-first logic behind the same public API; `examples/boot` prints
+   the same "guest ready" line (the bench timer is the curl loop, not
+   wait_ready).
+2. **Slim kernel** (`build_kernel_slim.sh`): same Linux 6.12.115, built
+   from `allnoconfig` + an explicit fragment (append + `olddefconfig`,
+   no `merge_config.sh`) — 64BIT/SMP, PRINTK, 8250+console, PCI(+MSI),
+   all virtio devices built-in, initramfs (uncompressed cpio), INET/UNIX,
+   **IPV6 off**, PROC/SYSFS/DEVTMPFS/TMPFS, ELF+script binfmt, futex/
+   epoll/signalfd/timerfd/eventfd, ACPI + IO-APIC (they alone describe
+   interrupts on Cloud Hypervisor x86_64), KVM_GUEST/PARAVIRT (kvmclock),
+   LZ4. Two traps worth remembering: `allnoconfig` omits the lines of
+   `default y` symbols (olddefconfig then re-enables them — IPV6, CPU
+   freq, thermal… need explicit `# … is not set`), and `VIRTIO_PCI`/
+   `VIRTIO_BLK` hide behind the `VIRTIO_MENU` / `BLK_DEV` menus.
+   Output: `assets/vmlinux-slim` (**4 051 968 bytes ≈ 3.9 MiB, −70.6 %**,
+   sha256 `c1efb844…`); `assets/vmlinux` (13 804 544 bytes ≈ 13.2 MiB)
+   is untouched and remains the default engine kernel. The slim variant
+   is selected at campaign time via `MYCEL_KERNEL=…/vmlinux-slim`
+   (recorded in `env.txt` of each campaign).
+
+### v3-stock — warm-up fix + stock 13.2 MiB kernel
+
+| Series | median | p95 | max | CV | runs > 800 ms |
+|---|---|---|---|---|---|
+| A — docker | 331.7 ms | 386.2 ms | 445.5 ms | 7.5 % | 0 |
+| C — microvm | 420.9 ms | 424.0 ms | **424.3 ms** | **0.4 %** | 0 |
+| C_b — microvm | 420.6 ms | 520.9 ms | 521.8 ms | 5.9 % | 0 |
+| A_b — docker | 322.8 ms | 358.3 ms | 364.8 ms | 4.4 % | 0 |
+
+The 9 s outlier is **gone** (v2: 2/60 at ~9 045 ms; v3: 0/60, worst run
+521.8 ms). Series C is essentially deterministic: 30/30 runs in a 6 ms
+window, CV 0.4 %. The warm-up itself is not free — the median settles
+~16 ms above v2's 404-410 ms — a flat, tail-free price.
+
+### v3-slim — warm-up fix + slim 3.9 MiB kernel
+
+| Series | median | p95 | max | CV | runs > 800 ms |
+|---|---|---|---|---|---|
+| A — docker | 345.3 ms | 372.1 ms | 415.5 ms | 5.8 % | 0 |
+| C — microvm | **118.3 ms** | 220.5 ms | 222.8 ms | 30.2 % | 0 |
+| C_b — microvm | **118.0 ms** | 318.5 ms | 320.3 ms | 40.2 % | 0 |
+| A_b — docker | 321.2 ms | 337.3 ms | 362.2 ms | 3.0 % | 0 |
+
+Same kernel version, minimal config: median boot **420.7 → 118.1 ms
+(−72 %, ×3.6)**, and the microVM now beats same-day Docker by ×2.7 on
+the median (118 vs 321-345 ms) — with a full dedicated kernel. Zero-queue
+confirmed across the whole campaign: **0 of 120 microvm runs above
+800 ms** in v3 (60 stock + 60 slim), worst 521.8 ms.
+
+Honest asterisks:
+
+- **The slim series is bimodal.** 23/30 runs per series land in a
+  near-deterministic 117-118 ms floor; the rest form a thin tail at
+  200-320 ms (roughly +100/+200 ms steps — nested-KVM scheduling
+  hiccups that were invisible at 420 ms become visible at this
+  timescale). Hence the high CV (30-40 %) despite the better median;
+  the worst slim run (320.3 ms) still beats every same-day Docker
+  median.
+- **Docker's baseline wanders between days** (v2: 455-480 ms, v3:
+  321-345 ms — same daemon, warm). Only same-day ABBA halves are
+  comparable; both are published.
+- Boot-median conclusions hold on this WSL2/nested-KVM host; the
+  absolute floor should drop further on native KVM.
+
+Raw files: `results-v3/stock/` and `results-v3/slim/` (next to this
+report). Reproduce:
+
+```bash
+cd bench/microvm
+KERNEL_VERSION=linux-6.12.115.tar.xz ./build_kernel_slim.sh   # assets/vmlinux-slim
+sudo env RESULTS=results-v3-stock bash run.sh                 # warm-up + stock kernel
+sudo env RESULTS=results-v3-slim \
+     MYCEL_KERNEL=$PWD/assets/vmlinux-slim bash run.sh        # warm-up + slim kernel
+```
