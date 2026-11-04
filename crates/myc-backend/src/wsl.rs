@@ -72,7 +72,7 @@ impl Wsl2 {
             .clone()
             .map_err(|e| {
                 BackendError::Unavailable(format!(
-                    "{e} — install one with `wsl --install -d Ubuntu`, \
+                    "{e} — run `myc setup-windows` to install WSL2 + Ubuntu (guided), \
                      or point MYCEL_WSL_DISTRO at an existing distro"
                 ))
             })
@@ -248,7 +248,11 @@ impl ExecBackend for Wsl2 {
                 name: "wsl2".into(),
                 ok: false,
                 detail: "WSL is not installed or has no distribution".into(),
-                fix: Some("install it: `wsl --install -d Ubuntu` (then reboot)".into()),
+                fix: Some(
+                    "run `myc setup-windows` (installs WSL2 + Ubuntu for you), or manually \
+                     `wsl --install -d Ubuntu` (then reboot)"
+                        .into(),
+                ),
             }
         } else {
             BackendCheck {
@@ -286,7 +290,7 @@ impl ExecBackend for Wsl2 {
                     name: "distro".into(),
                     ok: false,
                     detail: e.to_string(),
-                    fix: Some("`wsl --install -d Ubuntu`".into()),
+                    fix: Some("`myc setup-windows` (guided WSL2 + Ubuntu install)".into()),
                 });
                 None
             }
@@ -435,8 +439,10 @@ fn decode_console(bytes: &[u8]) -> String {
     let nuls = bytes.iter().take(64).filter(|&&b| b == 0).count();
     if nuls > 4 {
         let units: Vec<u16> = bytes
-            .chunks_exact(2)
-            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|c| u16::from_le_bytes(*c))
             .collect();
         String::from_utf16_lossy(&units)
     } else {
@@ -446,4 +452,455 @@ fn decode_console(bytes: &[u8]) -> String {
 
 fn sha256_hex(bytes: &[u8]) -> String {
     hex::encode(sha2::Sha256::digest(bytes))
+}
+
+// ---------------------------------------------------------------------------
+// Guided first-run setup: `myc setup-windows`
+//
+// "Docker Desktop installed WSL2 for me — so should myc." The flow detects
+// where the machine stands (WSL absent / WSL without a distro / WSL ready),
+// offers to run the elevated `wsl --install -d Ubuntu` through a UAC prompt
+// (PowerShell `Start-Process -Verb RunAs`), explains the required REBOOT,
+// and persists a small marker under the store root so the first run after
+// the reboot resumes at the right step: verify the twin end to end, then
+// point at the dashboard. Declining the guided path prints step-by-step
+// instructions instead. The detection and state-transition logic is pure
+// text-in/text-out so it is unit-tested on Linux (this module compiles for
+// `cfg(any(windows, test))`).
+// ---------------------------------------------------------------------------
+
+/// Microsoft's official WSL install guide (printed on the manual path).
+pub const WSL_INSTALL_DOC_URL: &str = "https://learn.microsoft.com/windows/wsl/install";
+
+/// Marker file under the host-side store root recording where the guided
+/// setup stands across reboots (~/.mycel/setup-windows.state).
+pub const SETUP_STATE_FILE: &str = "setup-windows.state";
+
+/// What `myc setup-windows` found on this machine.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WslStatus {
+    /// wsl.exe is missing, or it exists as the inbox stub but the WSL
+    /// optional component is disabled (it answers non-zero until enabled).
+    /// Either way `wsl --install` is the remedy.
+    Absent,
+    /// WSL answers but no distribution is installed.
+    NoDistro,
+    /// WSL answers and has distributions (names, default first).
+    Ready(Vec<String>),
+}
+
+/// Classify a machine from raw probe inputs (pure; the interactive flow
+/// feeds it real wsl.exe output, unit tests feed captured bytes).
+///
+/// Existing distros win over a failing `--status`: on Windows builds where
+/// `--status` is unsupported, a working distro still proves WSL is there.
+pub fn classify_wsl(wsl_exe_found: bool, wsl_status_ok: bool, list_output: &str) -> WslStatus {
+    if !wsl_exe_found {
+        return WslStatus::Absent;
+    }
+    let distros = distros_from_list_output(list_output);
+    if !distros.is_empty() {
+        return WslStatus::Ready(distros);
+    }
+    if wsl_status_ok {
+        WslStatus::NoDistro
+    } else {
+        // wsl.exe exists, refuses to answer and has no distro: the optional
+        // component is off. Same fix as "not installed at all".
+        WslStatus::Absent
+    }
+}
+
+/// Parse decoded `wsl.exe --list --quiet` output into distro names (pure).
+/// Blank lines, NUL padding and the human "no installed distributions"
+/// sentence some Windows builds print instead of an empty list are ignored.
+pub fn distros_from_list_output(list_output: &str) -> Vec<String> {
+    const NO_DISTRO_HINTS: [&str; 2] = [
+        "no installed distributions",
+        // "Use 'wsl --list --online' … to install a distribution."
+        "wsl --list --online",
+    ];
+    list_output
+        .lines()
+        .map(|l| l.trim().trim_matches('\0').trim())
+        .filter(|l| !l.is_empty())
+        .filter(|l| {
+            let lower = l.to_lowercase();
+            !NO_DISTRO_HINTS.iter().any(|h| lower.contains(h))
+        })
+        .map(str::to_string)
+        .collect()
+}
+
+/// Probe this machine: is wsl.exe there, does it answer, any distro?
+fn detect_wsl_status() -> WslStatus {
+    let status = Command::new("wsl.exe")
+        .arg("--status")
+        .stdin(Stdio::null())
+        .output();
+    let status_ok = status.as_ref().is_ok_and(|o| o.status.success());
+    let list_output = Command::new("wsl.exe")
+        .args(["--list", "--quiet"])
+        .stdin(Stdio::null())
+        .output()
+        .map(|o| decode_console(&o.stdout))
+        .unwrap_or_default();
+    classify_wsl(status.is_ok(), status_ok, &list_output)
+}
+
+/// Persisted stages of the guided setup (one keyword in the marker file) so
+/// the flow survives the reboot `wsl --install` demands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SetupStage {
+    /// The elevated `wsl --install -d Ubuntu` was launched; the required
+    /// reboot (and one first Ubuntu launch) is still pending.
+    InstallStarted,
+    /// WSL is ready and the Linux twin was verified — nothing left to do.
+    Complete,
+}
+
+/// Parse the marker file (pure). Unknown/garbled content → None: the flow
+/// simply re-detects from scratch, a stale marker is harmless.
+pub fn parse_setup_stage(raw: &str) -> Option<SetupStage> {
+    match raw.lines().next()?.trim() {
+        "install-started" => Some(SetupStage::InstallStarted),
+        "complete" => Some(SetupStage::Complete),
+        _ => None,
+    }
+}
+
+/// The keyword persisted for `stage` (pure).
+pub fn setup_stage_name(stage: SetupStage) -> &'static str {
+    match stage {
+        SetupStage::InstallStarted => "install-started",
+        SetupStage::Complete => "complete",
+    }
+}
+
+/// The stage to persist after a run that observed `status` (pure):
+///
+/// - a ready WSL always completes the flow (the twin is verified before
+///   persisting);
+/// - a just-launched install marks "reboot pending";
+/// - otherwise the marker is left as-is: still waiting for the reboot, or
+///   the user declined and nothing ever started (None).
+pub fn stage_to_persist(
+    persisted: Option<SetupStage>,
+    status: &WslStatus,
+    launched_install: bool,
+) -> Option<SetupStage> {
+    if matches!(status, WslStatus::Ready(_)) {
+        return Some(SetupStage::Complete);
+    }
+    if launched_install {
+        return Some(SetupStage::InstallStarted);
+    }
+    persisted
+}
+
+/// True when the marker says an install was launched but WSL still is not
+/// ready — the reboot / first Ubuntu launch is still pending (pure).
+pub fn reboot_pending(persisted: Option<SetupStage>, status: &WslStatus) -> bool {
+    persisted == Some(SetupStage::InstallStarted) && !matches!(status, WslStatus::Ready(_))
+}
+
+/// Write the marker (best effort: losing it only loses reboot resumption).
+fn persist_stage(path: &Path, stage: SetupStage) {
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let _ = std::fs::write(path, format!("{}\n", setup_stage_name(stage)));
+}
+
+/// Ask a yes/no question on an interactive stdin. Default is yes; anything
+/// starting with n/N (or EOF, or a non-terminal stdin) declines — we never
+/// elevate without an explicit human answer.
+fn confirm(question: &str) -> bool {
+    use std::io::IsTerminal;
+    if !std::io::stdin().is_terminal() {
+        return false;
+    }
+    println!("{question} [Y/n]");
+    let mut answer = String::new();
+    // Ok(0) = EOF: treat silence as a refusal, not as the default yes.
+    let answered = matches!(std::io::stdin().read_line(&mut answer), Ok(n) if n > 0);
+    answered && !answer.trim().to_lowercase().starts_with('n')
+}
+
+/// Elevate through a UAC prompt and run the installer to completion:
+/// `Start-Process -Verb RunAs wsl.exe --install -d Ubuntu` (single-quoted
+/// PowerShell strings — nothing to interpolate, no bare `$` or paths).
+/// Returns Ok(true) when the elevated process exited 0.
+fn launch_elevated_wsl_install() -> std::result::Result<bool, String> {
+    let script = "Start-Process -Verb RunAs -FilePath wsl.exe \
+                  -ArgumentList '--install','-d','Ubuntu' -Wait";
+    match Command::new("powershell.exe")
+        .args(["-NoProfile", "-Command", script])
+        .stdin(Stdio::null())
+        .status()
+    {
+        Ok(status) => Ok(status.success()),
+        Err(e) => Err(format!("cannot invoke powershell.exe: {e}")),
+    }
+}
+
+/// Step-by-step instructions for the do-it-myself path.
+fn print_manual_instructions() {
+    println!();
+    println!("Step-by-step (no automation):");
+    println!("  1. Open PowerShell or cmd as Administrator (Start menu, right-click).");
+    println!("  2. Run: wsl --install -d Ubuntu");
+    println!("  3. RESTART your computer when asked — this is required, not optional.");
+    println!("  4. After the reboot, launch \"Ubuntu\" once from the Start menu and");
+    println!("     create your Linux username/password if prompted.");
+    println!("  5. Run `myc setup-windows` again — it verifies the whole setup end to end.");
+    println!();
+    println!("Official guide: {WSL_INSTALL_DOC_URL}");
+}
+
+/// End-to-end verification: pick the distro, provision the twin, confirm
+/// the version matches this myc.exe.
+fn verify_twin() -> Result<()> {
+    let wsl = Wsl2::from_env();
+    let distro = wsl.distro()?;
+    let how = wsl.ensure_twin(&distro)?;
+    let version = wsl.twin_version(&distro);
+    println!(
+        "Linux twin in '{distro}' ok ({}) — {how}",
+        version.as_deref().unwrap_or("version unknown")
+    );
+    let ours = format!("myc {}", env!("CARGO_PKG_VERSION"));
+    if version.as_deref() != Some(ours.as_str()) {
+        eprintln!(
+            "myc: warning: myc.exe is {ours}, twin is {} — any proxied command self-heals this",
+            version.as_deref().unwrap_or("unknown")
+        );
+    }
+    Ok(())
+}
+
+/// `myc setup-windows`: the guided first-run flow (host-side, never
+/// proxied). Returns a process exit code.
+pub fn setup_windows() -> i32 {
+    let state_path = myc_store::Store::default_root().join(SETUP_STATE_FILE);
+    let persisted = std::fs::read_to_string(&state_path)
+        .ok()
+        .and_then(|raw| parse_setup_stage(&raw));
+    let status = detect_wsl_status();
+
+    match &status {
+        WslStatus::Ready(distros) => {
+            println!(
+                "WSL2 is ready ({} distro(s): {}).",
+                distros.len(),
+                distros.join(", ")
+            );
+            if persisted == Some(SetupStage::InstallStarted) {
+                println!("The install you launched earlier finished — completing the setup…");
+            }
+            match verify_twin() {
+                Ok(()) => {
+                    // stage_to_persist(_, ready, _) == Complete.
+                    persist_stage(&state_path, SetupStage::Complete);
+                    println!();
+                    println!("All set. Try:");
+                    println!("  myc shell alpine:3.20   interactive shell in any Docker Hub image");
+                    println!("  myc ui                  the dashboard (http://localhost:7777)");
+                    0
+                }
+                Err(e) => {
+                    eprintln!("myc: error: {e:#}");
+                    eprintln!(
+                        "myc: hint: fix the above, then re-run `myc setup-windows`; `myc doctor` \
+                         prints the full Windows + WSL2 picture"
+                    );
+                    1
+                }
+            }
+        }
+        WslStatus::Absent | WslStatus::NoDistro => {
+            // An install launched on a previous run: guide the reboot and
+            // the first Ubuntu launch instead of offering to install again.
+            if reboot_pending(persisted, &status) {
+                println!("The WSL2 + Ubuntu install you launched earlier is waiting on you:");
+                println!("  1. RESTART your computer — the install enables Windows features");
+                println!("     that only take effect after a reboot.");
+                println!("  2. After the reboot, launch \"Ubuntu\" once from the Start menu and");
+                println!("     create your Linux username/password if prompted.");
+                println!();
+                println!("Then run `myc setup-windows` again (any other myc command also picks");
+                println!("the setup back up automatically). If the install never completed,");
+                println!("relaunch it from an administrator terminal: wsl --install -d Ubuntu");
+                println!();
+                println!("Official guide: {WSL_INSTALL_DOC_URL}");
+                return 0;
+            }
+
+            let missing = match status {
+                WslStatus::Absent => "this machine has no usable WSL2",
+                WslStatus::NoDistro => "WSL2 is installed but has no Linux distribution",
+                WslStatus::Ready(_) => unreachable!("handled above"),
+            };
+            println!("myc runs containers inside WSL2 — the Linux layer Docker Desktop");
+            println!("used to install for you. Right now, {missing}.");
+
+            if confirm("Install WSL2 + Ubuntu for you now?") {
+                // Marker BEFORE the elevation: if the machine reboots
+                // mid-install, the next run guides the reboot instead of
+                // re-offering (stage_to_persist(_, _, true)).
+                persist_stage(&state_path, SetupStage::InstallStarted);
+                println!();
+                println!("Launching the installer — accept the Windows UAC prompt…");
+                match launch_elevated_wsl_install() {
+                    Ok(true) => {
+                        println!();
+                        println!("WSL2 + Ubuntu install launched.");
+                        println!("A RESTART of your computer is REQUIRED to finish it.");
+                        println!("After the reboot, launch \"Ubuntu\" once from the Start menu,");
+                        println!(
+                            "then run `myc setup-windows` again — it verifies the whole setup"
+                        );
+                        println!("end to end (any other myc command resumes the setup too).");
+                        0
+                    }
+                    Ok(false) => {
+                        eprintln!(
+                            "myc: the elevated installer did not complete (UAC declined or \
+                             wsl --install failed)."
+                        );
+                        print_manual_instructions();
+                        1
+                    }
+                    Err(e) => {
+                        eprintln!("myc: error: {e}");
+                        print_manual_instructions();
+                        1
+                    }
+                }
+            } else {
+                // Declined (or non-interactive): nothing is changed, and no
+                // marker is written (stage_to_persist(_, _, false) → None).
+                print_manual_instructions();
+                1
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn distro_lists_are_parsed_from_utf16_and_utf8_output() {
+        // wsl.exe itself prints UTF-16LE with NUL padding.
+        let utf16: Vec<u8> = "Ubuntu\r\nUbuntu-22.04\r\n\0\0"
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        let decoded = decode_console(&utf16);
+        assert_eq!(
+            distros_from_list_output(&decoded),
+            ["Ubuntu", "Ubuntu-22.04"]
+        );
+        // Output relayed from Linux-side programs is plain UTF-8.
+        assert_eq!(
+            distros_from_list_output("Ubuntu\nDebian\n"),
+            ["Ubuntu", "Debian"]
+        );
+    }
+
+    #[test]
+    fn no_distro_messages_are_not_distro_names() {
+        assert!(distros_from_list_output("").is_empty());
+        assert!(distros_from_list_output("\0\0\0\0").is_empty());
+        assert!(distros_from_list_output("  \r\n \n").is_empty());
+        // Some Windows builds print a sentence instead of an empty list.
+        assert!(distros_from_list_output(
+            "Windows Subsystem for Linux has no installed distributions.\r\n"
+        )
+        .is_empty());
+        assert!(distros_from_list_output("Use 'wsl --list --online' to install one.\n").is_empty());
+    }
+
+    #[test]
+    fn classification_covers_the_three_states() {
+        // No wsl.exe at all.
+        assert_eq!(classify_wsl(false, false, ""), WslStatus::Absent);
+        assert_eq!(classify_wsl(false, true, "Ubuntu"), WslStatus::Absent);
+        // WSL answers, no distro installed.
+        assert_eq!(classify_wsl(true, true, ""), WslStatus::NoDistro);
+        // wsl.exe exists but the optional component is off (stub answers
+        // non-zero): same remedy as absent.
+        assert_eq!(classify_wsl(true, false, ""), WslStatus::Absent);
+        assert_eq!(
+            classify_wsl(true, false, "has no installed distributions"),
+            WslStatus::Absent
+        );
+        // Existing distros win over a failing --status (old builds).
+        assert_eq!(
+            classify_wsl(true, false, "Ubuntu"),
+            WslStatus::Ready(vec!["Ubuntu".to_string()])
+        );
+        assert_eq!(
+            classify_wsl(true, true, "Ubuntu\nDebian"),
+            WslStatus::Ready(vec!["Ubuntu".to_string(), "Debian".to_string()])
+        );
+    }
+
+    #[test]
+    fn setup_stage_marker_round_trips() {
+        assert_eq!(
+            parse_setup_stage("install-started\n"),
+            Some(SetupStage::InstallStarted)
+        );
+        assert_eq!(parse_setup_stage("complete"), Some(SetupStage::Complete));
+        assert_eq!(parse_setup_stage(""), None);
+        assert_eq!(parse_setup_stage("garbage"), None);
+        assert_eq!(
+            setup_stage_name(SetupStage::InstallStarted),
+            "install-started"
+        );
+        assert_eq!(setup_stage_name(SetupStage::Complete), "complete");
+    }
+
+    #[test]
+    fn stage_transitions_form_the_reboot_loop() {
+        let ready = WslStatus::Ready(vec!["Ubuntu".to_string()]);
+        // Fresh machine, user accepts: reboot-pending marker.
+        assert_eq!(
+            stage_to_persist(None, &WslStatus::Absent, true),
+            Some(SetupStage::InstallStarted)
+        );
+        assert!(reboot_pending(
+            Some(SetupStage::InstallStarted),
+            &WslStatus::Absent
+        ));
+        // Still no WSL after the install ran: keep waiting for the reboot.
+        assert_eq!(
+            stage_to_persist(
+                Some(SetupStage::InstallStarted),
+                &WslStatus::NoDistro,
+                false
+            ),
+            Some(SetupStage::InstallStarted)
+        );
+        assert!(reboot_pending(
+            Some(SetupStage::InstallStarted),
+            &WslStatus::NoDistro
+        ));
+        // Post-reboot: WSL ready → complete, no longer pending.
+        assert_eq!(
+            stage_to_persist(Some(SetupStage::InstallStarted), &ready, false),
+            Some(SetupStage::Complete)
+        );
+        assert!(!reboot_pending(Some(SetupStage::InstallStarted), &ready));
+        // Declined before anything started: nothing persisted.
+        assert_eq!(stage_to_persist(None, &WslStatus::Absent, false), None);
+        // Complete is sticky.
+        assert_eq!(
+            stage_to_persist(Some(SetupStage::Complete), &ready, false),
+            Some(SetupStage::Complete)
+        );
+    }
 }

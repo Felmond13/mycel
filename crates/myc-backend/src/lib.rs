@@ -20,7 +20,10 @@ pub mod native;
 pub mod portproxy;
 #[cfg(target_os = "macos")]
 pub mod vm;
-#[cfg(windows)]
+/// Windows WSL2 proxy backend. Also compiled under `cfg(test)` on every
+/// platform so its pure detection/state logic (parsing of wsl.exe output,
+/// setup-marker state machine) is unit-tested on Linux too.
+#[cfg(any(windows, test))]
 pub mod wsl;
 
 /// Isolation tiers, strongest first. Mycel never depends on a single one:
@@ -93,12 +96,12 @@ pub struct EngineInfo {
 /// prints this list so the choice is never a mystery. The default backend is
 /// the strongest *complete* tier: the microVM tiers are deliberately not
 /// default until they carry the full `RunRequest` surface.
-pub fn detect_engines(store_root: &std::path::Path) -> Vec<EngineInfo> {
+pub fn detect_engines(_store_root: &std::path::Path) -> Vec<EngineInfo> {
     let mut engines = Vec::new();
     #[cfg(target_os = "linux")]
     {
         let kvm = kvm::KvmMicroVm::from_env();
-        let report = kvm.probe(store_root);
+        let report = kvm.probe(_store_root);
         // complete = the full production path (voie B virtiofs): arbitrary
         // environments end to end. ext4-only hosts stay PARTIAL.
         engines.push(EngineInfo {
@@ -125,7 +128,7 @@ pub fn detect_engines(store_root: &std::path::Path) -> Vec<EngineInfo> {
     }
     #[cfg(target_os = "linux")]
     {
-        let native = native::NativeLinux.probe(store_root);
+        let native = native::NativeLinux.probe(_store_root);
         engines.push(EngineInfo {
             kind: EngineKind::NativeNamespaces,
             available: native.available,

@@ -9,6 +9,9 @@
 //! What is NOT proxied:
 //! - `myc doctor`: Windows-specific checks (WSL2? distro? twin provisioned
 //!   and version-matched?) followed by the twin's own Linux-side checks.
+//! - `myc setup-windows`: guided first-run flow — detects WSL2, offers to
+//!   run the elevated `wsl --install -d Ubuntu`, walks the required reboot,
+//!   then verifies the twin (see `myc_backend::wsl`).
 //! - `--no-proxy` anywhere on the command line: escape hatch running the
 //!   native Windows build against a host-side store (portable commands
 //!   only: ls/inspect/stats/gc/…; containers cannot run natively).
@@ -70,6 +73,9 @@ pub fn preflight() -> Preflight {
         None if !forwarded.is_empty() => Preflight::Native(args),
         // Windows-aware doctor.
         Some("doctor") => Preflight::Exit(doctor()),
+        // Guided first-run setup: WSL2 + Ubuntu install, reboot resumption,
+        // twin verification (host-side, never proxied).
+        Some("setup-windows") => Preflight::Exit(myc_backend::wsl::setup_windows()),
         // Everything else — including bare `myc` — goes to the twin.
         _ => {
             if subcommand.as_deref() == Some("ui") {
@@ -193,8 +199,8 @@ fn proxy(args: &[OsString]) -> i32 {
         Err(e) => {
             eprintln!("myc: error: {e:#}");
             eprintln!(
-                "myc: hint: `myc doctor` diagnoses the Windows/WSL2 setup; \
-                 `wsl --install -d Ubuntu` installs WSL2"
+                "myc: hint: `myc setup-windows` installs WSL2 + Ubuntu for you (guided); \
+                 `myc doctor` diagnoses the Windows/WSL2 setup; manual: `wsl --install -d Ubuntu`"
             );
             1
         }
