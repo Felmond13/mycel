@@ -68,6 +68,18 @@ assets — `install.sh --with-vm` pre-installs them into
 into `~/.mycel/vm-assets/` on first use (sha256-checked when the release
 ships sidecars); `cloud-hypervisor`/`virtiofsd` remain distro packages.
 
+aarch64 (pipeline status, no unmeasured claims): releases also ship
+`myc-linux-aarch64` (native build on GitHub's free arm64 runners,
+continuously validated by `.github/workflows/ci-arm64.yml` — fmt + clippy
++ the whole test suite) and the aarch64 guest assets
+`vmlinux-vmfs-aarch64` + `init-vm-aarch64.cpio` (same scripts with
+`ARCH=aarch64`, native arm64 build; PL011 console). These assets are
+**published, not validated**: the engine still executes x86_64 guests
+only — on an aarch64 host it reports itself unavailable (`myc doctor`
+says exactly why) and workloads run through `native-namespaces`, the
+default. Engine wiring on arm64 is pending hardware validation; no boot,
+e2e or latency number exists for aarch64, so none is claimed.
+
 Network: a VM cannot share the host network namespace, so "host" mode is
 emulated — every port the image exposes (or `-p`) is published. External
 clients go through `nat PREROUTING` DNAT + FORWARD rules tagged `myc-<n>`
@@ -91,7 +103,9 @@ boot + virtiofs handshake; the warm pool (§ below) is the answer for
 latency-critical paths.
 
 Known limits (v1): `--map-user` ignored (workloads run as guest root);
-x86_64 guests only; one /24 bridge (`MYCEL_VM_CIDR`, 253 concurrent
+x86_64 guests only (aarch64: binary + guest assets published, engine
+wiring pending hardware validation — see the distribution note above); one
+/24 bridge (`MYCEL_VM_CIDR`, 253 concurrent
 networked guests); `--join-net`/`--lazy`/`--run-dir` refused on this
 engine; PID 1 does not reap orphaned grandchildren; a SIGKILLed `myc`
 bypasses cleanup (SIGINT/SIGTERM are handled and tear everything down).

@@ -76,7 +76,12 @@ runs:
         MYC_VERSION: ${{ inputs.version }}
       run: |
         set -euo pipefail
-        asset="myc-linux-x86_64"
+        # Prebuilt binary per arch (same names as scripts/install.sh).
+        case "$(uname -m)" in
+          x86_64) asset="myc-linux-x86_64" ;;
+          aarch64) asset="myc-linux-aarch64" ;;
+          *) echo "no prebuilt myc binary for $(uname -m)" >&2; exit 1 ;;
+        esac
         bindir="$RUNNER_TEMP/mycel-bin"
         mkdir -p "$bindir"
 
