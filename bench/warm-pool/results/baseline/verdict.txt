@@ -1,0 +1,3 @@
+plancher CLI (myc --version)              : n=30 median=    2.3 ms  p95=    3.6 ms
+e2e ROOT snapshot warm (réseau)           : n=30 median=  298.5 ms  p95=  418.5 ms
+e2e ROOT snapshot warm (--net none)       : n=30 median=  190.5 ms  p95=  298.0 ms
