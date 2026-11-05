@@ -4,15 +4,15 @@
 //! (user namespaces, see `myc-run`). On Windows, `myc.exe` transparently
 //! proxies every command to a "twin" Linux binary inside WSL2 — one store,
 //! one feature set, no daemon (see [`wsl`]). On macOS a lightweight-VM
-//! backend is planned but not yet available (see [`vm`] and
-//! `docs/desktop-architecture.md`).
+//! backend (libkrun over Hypervisor.framework) exists behind an explicit
+//! experimental guard — see [`vm`] and `docs/isolation-engines.md`.
 //!
 //! The [`ExecBackend`] trait is the seam between the CLI and those
 //! strategies: `probe()` reports whether the backend can work here (with an
 //! actionable fix when it cannot), `run()` executes one container.
 
 /// Guest asset auto-provision shared by the microVM engines (download
-/// cache + GitHub Release fetch; used by [`kvm`]).
+/// cache + GitHub Release fetch; used by [`kvm`] and [`vm`]).
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) mod assets;
 /// Firecracker snapshot accelerator for the kvm-microvm engine (used by
@@ -26,7 +26,12 @@ pub mod native;
 /// Userland TCP relay for published ports (used by [`kvm`]; generic).
 #[cfg(target_os = "linux")]
 pub mod portproxy;
-#[cfg(target_os = "macos")]
+/// macOS microVM backend — libkrun over Hypervisor.framework
+/// (experimental; see `bench/macos-libkrun/NOTES.md`). Also compiled
+/// under `cfg(test)` on every platform so its pure planning logic
+/// (RunRequest → libkrun call plan, availability decision, exec
+/// resolution) is unit-tested on Linux too, exactly like [`wsl`].
+#[cfg(any(target_os = "macos", test))]
 pub mod vm;
 /// Windows WSL2 proxy backend. Also compiled under `cfg(test)` on every
 /// platform so its pure detection/state logic (parsing of wsl.exe output,
@@ -43,8 +48,8 @@ pub enum EngineKind {
     /// Real virtual machine, own kernel (Linux + KVM). Strongest isolation;
     /// carries the full `RunRequest` surface (see [`kvm`]).
     KvmMicroVm,
-    /// Real virtual machine via Hypervisor.framework (macOS plan,
-    /// `docs/desktop-architecture.md`).
+    /// Real virtual machine, own kernel (macOS via Hypervisor.framework
+    /// driven by libkrun; experimental — see [`vm`]).
     HypervisorFramework,
     /// Transparent proxy to the Linux twin inside WSL2 (Windows).
     Wsl2,
@@ -79,7 +84,13 @@ impl EngineKind {
                 "x86_64 guests only (aarch64: binaries + guest assets published, \
                  engine wiring pending hardware validation)",
             ],
-            Self::HypervisorFramework => &["architecture only (see docs/desktop-architecture.md)"],
+            Self::HypervisorFramework => &[
+                "EXPERIMENTAL (opt-in: MYCEL_VM_EXPERIMENTAL=1) — no Apple hardware in CI, \
+                 nothing validated end to end",
+                "libkrun executes the guest in-process and exits with the workload's code",
+                "bind mounts, hostname, --map-user and published ports are ignored/refused in v1",
+                "networking off by default (a gvproxy/socket_vmnet helper is needed for egress)",
+            ],
             Self::Wsl2 => &["containers execute inside the WSL2 Linux twin"],
             Self::NativeNamespaces => &[
                 "shared kernel with the host — isolation is Docker-level, not better",
@@ -122,9 +133,15 @@ pub fn detect_engines(_store_root: &std::path::Path) -> Vec<EngineInfo> {
     }
     #[cfg(target_os = "macos")]
     {
+        // Experimental tier (see vm::Vm): availability is honest — dylib
+        // found + explicit MYCEL_VM_EXPERIMENTAL=1 — and NEVER complete:
+        // no Apple hardware exists in CI, so the auto policy can not pick
+        // it; only an explicit `--engine hvf-microvm` runs it.
+        let vm = vm::Vm::from_env();
+        let report = vm.probe(_store_root);
         engines.push(EngineInfo {
             kind: EngineKind::HypervisorFramework,
-            available: false,
+            available: report.available,
             complete: false,
         });
     }
@@ -357,7 +374,8 @@ pub trait ExecBackend {
 ///
 /// - Linux: [`native::NativeLinux`] (user namespaces, exactly `myc run`).
 /// - Windows: [`wsl::Wsl2`] (transparent proxy to the WSL2 twin).
-/// - macOS: [`vm::Vm`] (scaffold; returns "not yet available").
+/// - macOS: [`vm::Vm`] (libkrun microVM, experimental — probe reports the
+///   honest state; runs never reach it without `--engine hvf-microvm`).
 pub fn default_backend() -> Box<dyn ExecBackend> {
     #[cfg(target_os = "linux")]
     {
@@ -369,7 +387,7 @@ pub fn default_backend() -> Box<dyn ExecBackend> {
     }
     #[cfg(target_os = "macos")]
     {
-        Box::new(vm::Vm)
+        Box::new(vm::Vm::from_env())
     }
     #[cfg(not(any(target_os = "linux", windows, target_os = "macos")))]
     {
