@@ -626,7 +626,9 @@ doctor` prints the detected tiers and the default it would pick):
   run dirs, interactive runs, pasta isolation (`--net isolated`) and
   rootless port publishing fall back to namespaces with the reason on
   stderr. Boot benchmark vs Docker (same static binary both sides):
-  `bench/microvm`.
+  `bench/microvm`. Firecracker snapshot runs can be hardened with the
+  official jailer (chroot, uid drop, seccomp): `MYCEL_FC_JAILER=1`
+  ([docs/isolation-engines.md](docs/isolation-engines.md)).
 - **`native-namespaces`** — rootless user namespaces: the fallback (and
   the only tier for pods and interactive shells), carrying the full
   feature set. Shared kernel: Docker-level isolation, not better.

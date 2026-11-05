@@ -1,5 +1,5 @@
-boot FROID  (FC boot + snapshot) : n=30 median=1860.9 ms  p95=4406.6 ms
-RESTORE     (FC snapshot)        : n=30 median=171.5 ms  p95=205.0 ms
-accélération médiane             : x10.9 (gain médian 1689 ms)
-repli CH   (voie B, cache off)   : n=30 median=376.5 ms  p95=431.0 ms
-restore vs repli CH              : x2.2 (gain médian 205 ms)
+boot FROID  (FC boot + snapshot) : n=30 median=1801.9 ms  p95=2181.4 ms
+RESTORE     (FC snapshot)        : n=30 median=176.2 ms  p95=204.3 ms
+accélération médiane             : x10.2 (gain médian 1626 ms)
+repli CH   (voie B, cache off)   : n=30 median=357.4 ms  p95=451.0 ms
+restore vs repli CH              : x2.0 (gain médian 181 ms)

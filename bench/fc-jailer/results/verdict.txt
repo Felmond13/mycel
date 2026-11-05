@@ -1,0 +1,6 @@
+RESTORE JAILÉ  (MYCEL_FC_JAILER=1) : n=30 median=224.2 ms  p95=268.8 ms
+RESTORE DIRECT (défaut)            : n=30 median=243.9 ms  p95=344.5 ms
+overhead jailer                    : médiane +-19.7 ms  p95 +-75.7 ms  (x0.92)
+FROID JAILÉ (boot+snapshot)        : n=30 median=1718.8 ms  p95=2349.2 ms
+REPLI CH (voie B, cache off)       : n=30 median=435.6 ms  p95=510.3 ms
+restore jailé vs repli CH          : x1.9 (gain médian 211 ms)
