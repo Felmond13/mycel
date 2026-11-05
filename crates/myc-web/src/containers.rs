@@ -135,6 +135,34 @@ fn resolve_engine(
     image_exposes_ports: bool,
 ) -> (&'static str, Option<String>) {
     if spec.engine == "kvm-microvm" {
+        // Desktop safety net: an explicit microVM choice that CANNOT run
+        // as requested must not hard-fail a UI start. The Start dialog
+        // initializes its picker from the server default (kvm-microvm
+        // whenever READY), so a non-root UI would otherwise fail every
+        // port-publishing app with an error the user cannot act on. Fall
+        // back to namespaces with the reason in the log; the CLI keeps
+        // the strict error for scripts.
+        let ports = !spec.ports.is_empty() || image_exposes_ports;
+        if spec.pod {
+            return (
+                "native-namespaces",
+                Some(
+                    "engine: native-namespaces (kvm-microvm cannot join a pod's namespaces)".into(),
+                ),
+            );
+        }
+        if spec.isolated_network {
+            return (
+                "native-namespaces",
+                Some(
+                    "engine: native-namespaces (network isolation is a namespaces feature)".into(),
+                ),
+            );
+        }
+        if !is_root && ports {
+            return ("native-namespaces",
+                Some("engine: native-namespaces (kvm-microvm cannot publish ports without a root myc)".into()));
+        }
         return ("kvm-microvm", None);
     }
     if !spec.wants_auto() {
@@ -1570,6 +1598,28 @@ mod tests {
     /// The web applies the SAME automatic policy as `myc run` — this is
     /// the contract that keeps the terminal and the dashboard coherent.
     /// Pure inputs, no machine state.
+    #[test]
+    fn explicit_kvm_falls_back_when_rootless_ports() {
+        // Real-world regression (mongo from the catalog on a non-root UI):
+        // the Start picker seeds itself with the server default
+        // (kvm-microvm when READY), an explicit choice that cannot publish
+        // ports rootless used to hard-fail the container.
+        let mut spec = spec(&[]);
+        spec.engine = "kvm-microvm".into();
+        let (engine, note) = resolve_engine(&spec, true, false, true);
+        assert_eq!(engine, "native-namespaces");
+        assert!(note.unwrap().contains("publish ports"));
+
+        // Same request under root: the microVM runs it.
+        let (engine, note) = resolve_engine(&spec, true, true, true);
+        assert_eq!(engine, "kvm-microvm");
+        assert!(note.is_none());
+
+        // Rootless without any port: microVM too (offline root runs).
+        let (engine, _) = resolve_engine(&spec, true, false, false);
+        assert_eq!(engine, "kvm-microvm");
+    }
+
     #[test]
     fn auto_engine_resolution_matches_the_cli_policy() {
         let mut auto = spec(&["echo ok"]);
