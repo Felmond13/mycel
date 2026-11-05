@@ -146,6 +146,62 @@ falls back to namespaces for them, with the reason on stderr); PID 1 does
 not reap orphaned grandchildren; a SIGKILLed `myc` bypasses cleanup
 (SIGINT/SIGTERM are handled and tear everything down).
 
+## Hardening the Firecracker path: the official jailer (`MYCEL_FC_JAILER=1`)
+
+The snapshot accelerator boots Firecracker as a direct child of the engine —
+parity with the (unjailed) Cloud Hypervisor path. The upstream jailer of the
+same v1.17.0 release adds the missing production isolation, opt-in via
+`MYCEL_FC_JAILER=1` (**default OFF** until more exposure; see the measured
+verdict below):
+
+- **chroot + pivot_root** into a per-run tree
+  `<snapshots_root>/jails/firecracker/<run-id>/root` (the v1.17 layout), in a
+  private **mount namespace**;
+- **uid/gid drop** to a dedicated account — uid/gid **20000:20000**, below
+  every login-uid range (Linux assigns users from 1000), so the VMM matches
+  no real user; `CapEff`/`CapPrm` end at zero and `NoNewPrivs` is set;
+- **device nodes re-created inside the jail** (`/dev/kvm`, `/dev/net/tun`,
+  `/dev/urandom`, `/dev/userfaultfd`) owned by that account — the host
+  `/dev/kvm` (0660 root:kvm) is never touched;
+- **seccomp**: Firecracker's own filter (it applies it jailed or not —
+  `Seccomp: 2` in `/proc/<pid>/status` either way; the jailer adds the
+  chroot/uid layers on top).
+
+Mechanics worth knowing (all measured on the WSL2 dev machine, proofs in
+`docs/benchmarks/fc-jailer.md`): the jailer v1.17 `execve`s the VMM when run
+without `--daemonize`/`--new-pid-ns`, so the spawned pid IS Firecracker —
+SIGTERM/exit-code/cleanup semantics are unchanged. Everything the VM must
+see (kernel ELF, initramfs, rootfs, scratch, vmstate, mem) is hard-linked
+into `<jail>/root/run/` at stable `/run/<name>` paths before launch (the
+Firecracker vmstate re-opens drives by the paths the VM saw — hence a
+`jailer=1` epoch in the snapshot fingerprint; jailed and direct snapshots
+are separate caches). Hard links are instant even for the 512 MiB `mem.img`;
+a cross-device snapshot root falls back to a copy. The jail lives under the
+snapshots root, never `/tmp`: tmpfs is typically mounted `nodev`, and a
+device node that cannot be opened kills the jailed VMM with `EACCES` for
+everyone, root included (measured — that is not a jailer bug, it is a mount
+flag). Networking stays host-managed: v1.17 has no `--net-tap` anymore (it
+moved tap creation entirely to the caller) and mycel passes no `--netns`,
+so the VMM opens the host tap from the host network namespace — the tap is
+created owned by uid 20000 (`ip tuntap ... user 20000`) because TUNSETIFF
+from a capability-less process only accepts the device's owner (any other
+uid: EPERM, measured). Cgroups: the jailer only touches them when `--cgroup`
+limits are passed; mycel passes none — WSL2 exposes cgroup v2 without
+delegation, and the CH path enforces no limits either (parity; adding
+`--cgroup` knobs later is trivial). Root is required (chroot, mknod, tap
+ownership); a non-root jailed request falls back to Cloud Hypervisor with
+the reason on stderr, never to un-jailed Firecracker.
+
+Measured verdict (WSL2 dev machine, hyperfine n=30 per scenario, every run
+verified `ok`+exit 0; full methodology + proofs: `docs/benchmarks/fc-jailer.md`):
+warm restore **jailed 224.2 ms median / 268.8 ms p95 vs direct 243.9 ms /
+344.5 ms p95** — the jailer costs nothing measurable (the jailed median is
+even 19.7 ms lower, inside run-to-run σ; the jailed p95 is 76 ms BETTER),
+while adding chroot, uid drop, zero capabilities and a private mount
+namespace. Cold boot jailed: 1.72 s median (snapshot creation included).
+Recommendation: keep the default OFF for one more cycle of exposure, then
+flip it — it is strictly more isolation for no measurable latency.
+
 ## microVM boot benchmark (`bench/microvm`)
 
 Same static musl binary (`benchhttp.rs`, std-only) everywhere: a `FROM

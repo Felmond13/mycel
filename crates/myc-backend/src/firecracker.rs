@@ -42,11 +42,47 @@
 //! DNAT rules, userland port relay, permanent ARP + ICMP warmup semantics).
 //! Firecracker does not create its own tap: the host creates `myc-<n>`
 //! before the VMM starts and deletes it afterwards.
+//!
+//! # Hardening with the official jailer (`MYCEL_FC_JAILER=1`)
+//!
+//! By default Firecracker runs as direct child of the engine — parity with
+//! the (unjailed) Cloud Hypervisor path. Setting `MYCEL_FC_JAILER=1`
+//! launches it through the upstream jailer of the SAME v1.17.0 release
+//! instead: chroot + pivot_root into a per-run jail tree
+//! (`<state_dir>/jail/<exec-name>/<id>/root`, v1.17 layout), private mount
+//! namespace, uid/gid drop to a dedicated account (20000:20000, below the
+//! system uid range so it can never match a login user), device nodes
+//! (`/dev/kvm`, `/dev/net/tun`, `/dev/urandom`) re-created inside the jail
+//! and owned by that account, and Firecracker's own seccomp filter.
+//! Without `--daemonize` and `--new-pid-ns` the jailer `execve`s the VMM,
+//! so the spawned pid IS Firecracker — SIGTERM/exit-code handling stays
+//! identical to the direct path.
+//!
+//! Everything the VM must see is hard-linked into `<jail>/root/run/` at
+//! STABLE names (`/run/rootfs.ext4`, `/run/scratch.img`, ...) before the
+//! jailer starts, and the snapshot files FC creates there are linked back
+//! out into the cache afterwards. Hard links are instant even for the
+//! 512 MiB `mem.img`; a cross-device snapshot root (hard link refused)
+//! falls back to a copy. Because the Firecracker vmstate embeds the drive
+//! paths AS THE VM SAW THEM (`/run/...` jailed vs `~/.mycel/...` direct),
+//! jailed and direct runs use separate snapshot caches: the fingerprint
+//! carries a `jailer=1` epoch part.
+//!
+//! Networking stays host-managed: no `--netns` (the jailer v1.17 no longer
+//! moves taps — that was `--net-tap`, removed upstream), so the jailed VMM
+//! keeps opening the host tap from the host network namespace. The tap is
+//! created owned by uid 20000 (`ip tuntap ... user 20000`) so the
+//! privilege-dropped VMM can still attach (TUNSETIFF allows the device
+//! owner without CAP_NET_ADMIN; any other uid gets EPERM — measured).
+//! Cgroups: the jailer only touches them when `--cgroup` options are
+//! passed; mycel passes none (WSL2 exposes cgroup v2 with no delegation,
+//! and no limits are enforced on the CH path either — parity).
 
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::net::SocketAddr;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -79,6 +115,14 @@ const MIN_FC_BYTES: u64 = 1024 * 1024;
 /// `vmlinux-vmfs` bzImage — Firecracker does not load bzImages).
 pub(crate) const FC_KERNEL_ASSET: &str = "vmlinux-vmfs.elf";
 const MIN_KERNEL_BYTES: u64 = 1024 * 1024;
+
+/// Dedicated unprivileged account the jailer drops to when
+/// `MYCEL_FC_JAILER=1`. 20000 sits below no system uid range (Linux
+/// assigns login users from 1000), so it can never collide with a real
+/// user; the jail tree device nodes and the snapshot drives are chowned
+/// to it, nothing else on the host is.
+const JAILER_UID: u32 = 20000;
+const JAILER_GID: u32 = 20000;
 
 /// Bump to invalidate every cached snapshot (agent protocol changes).
 const AGENT_PROTOCOL: u32 = 1;
@@ -344,6 +388,8 @@ fn wait_fc_api(socket: &Path, child: &mut Child, timeout: Duration) -> bool {
         socket: socket.to_path_buf(),
         read_timeout: Duration::from_secs(2),
     };
+    let t0 = Instant::now();
+    let mut last_report = String::new();
     while Instant::now() < deadline {
         match child.try_wait() {
             Ok(Some(_)) | Err(_) => return false,
@@ -351,6 +397,17 @@ fn wait_fc_api(socket: &Path, child: &mut Child, timeout: Duration) -> bool {
         }
         if probe.ping() {
             return true;
+        }
+        if std::env::var("MYCEL_VM_TRACE").ok().as_deref() == Some("1") {
+            let report = format!("exists={}", socket.exists());
+            if report != last_report {
+                eprintln!(
+                    "[myc-vm] api wait t+{}ms: {report} connect_err={:?}",
+                    t0.elapsed().as_millis(),
+                    UnixStream::connect(socket).err()
+                );
+                last_report = report;
+            }
         }
         thread::sleep(Duration::from_millis(10));
     }
@@ -677,24 +734,12 @@ fn find_file_recursive(dir: &Path, pred: &dyn Fn(&str) -> bool) -> Option<PathBu
     None
 }
 
-/// Locate the Firecracker binary: env/system path first, the download
-/// cache second, a one-shot upstream release download last (extracted
-/// from the release tarball; the jailer is ignored — parity with Cloud
-/// Hypervisor, which runs unjailed).
-pub(crate) fn resolve_fc_bin(engine: &crate::kvm::KvmMicroVm) -> Result<PathBuf> {
-    if is_executable(&engine.fc_bin) {
-        return Ok(engine.fc_bin.clone());
-    }
-    let cache = vm_assets_cache().join("firecracker");
-    if is_executable(&cache) {
-        return Ok(cache);
-    }
-    eprintln!(
-        "[myc-vm] firecracker missing at {} — downloading once from the upstream \
-         {FC_RELEASE_TAG} release into {} (override with MYCEL_FC_BIN)",
-        engine.fc_bin.display(),
-        cache.display()
-    );
+/// Install one binary of the upstream release (`firecracker` or `jailer`)
+/// into the assets cache: download the tarball, extract, pick the
+/// version-suffixed binary, verify the ELF magic. The two binaries ship
+/// in the same tarball — only the pick differs.
+fn install_release_binary(asset: &str) -> Result<PathBuf> {
+    let cache = vm_assets_cache().join(asset);
     std::fs::create_dir_all(vm_assets_cache())?;
     let bytes = http_fetch(&FC_RELEASE_URLS, MIN_FC_BYTES)?;
     let extract = tempfile::tempdir()?;
@@ -712,17 +757,16 @@ pub(crate) fn resolve_fc_bin(engine: &crate::kvm::KvmMicroVm) -> Result<PathBuf>
             "cannot extract the firecracker release tarball".into(),
         ));
     }
-    // v1.17 layout: release-vX.Y.Z-x86_64/firecracker-vX.Y.Z-x86_64. The
-    // tarball also ships firecracker_spec-vX.Y.Z.yaml (the API swagger —
-    // plain text!) and .debug twins: match the version-suffixed binary
-    // shape exactly, then verify the ELF magic before trusting the cache.
+    // v1.17 layout: release-vX.Y.Z-x86_64/<asset>-vX.Y.Z-x86_64. Match the
+    // version-suffixed binary shape exactly (the tarball also ships .debug
+    // twins, the API swagger and helper tools), then verify the ELF magic
+    // before trusting the cache.
+    let prefix = format!("{asset}-v");
     let bin = find_file_recursive(extract.path(), &|name| {
-        (name == "firecracker" || name.starts_with("firecracker-v"))
-            && !name.ends_with(".debug")
-            && !name.contains("jailer")
+        (name == asset || name.starts_with(&prefix)) && !name.ends_with(".debug")
     })
     .ok_or_else(|| {
-        BackendError::Unavailable("no firecracker binary inside the release tarball".into())
+        BackendError::Unavailable(format!("no {asset} binary inside the release tarball"))
     })?;
     std::fs::copy(&bin, &cache)?;
     std::fs::set_permissions(&cache, std::fs::Permissions::from_mode(0o755))?;
@@ -734,6 +778,53 @@ pub(crate) fn resolve_fc_bin(engine: &crate::kvm::KvmMicroVm) -> Result<PathBuf>
         )));
     }
     Ok(cache)
+}
+
+/// Locate the Firecracker binary: env/system path first, the download
+/// cache second, a one-shot upstream release download last.
+pub(crate) fn resolve_fc_bin(engine: &crate::kvm::KvmMicroVm) -> Result<PathBuf> {
+    if is_executable(&engine.fc_bin) {
+        return Ok(engine.fc_bin.clone());
+    }
+    let cache = vm_assets_cache().join("firecracker");
+    if is_executable(&cache) {
+        return Ok(cache);
+    }
+    eprintln!(
+        "[myc-vm] firecracker missing at {} — downloading once from the upstream \
+         {FC_RELEASE_TAG} release into {} (override with MYCEL_FC_BIN)",
+        engine.fc_bin.display(),
+        cache.display()
+    );
+    install_release_binary("firecracker")
+}
+
+/// Locate the jailer binary (only needed with `MYCEL_FC_JAILER=1`):
+/// `MYCEL_FC_JAILER_BIN` override first, the download cache second, the
+/// upstream release tarball last. The jailer MUST come from the same
+/// release as the Firecracker binary (the jail layout and the exec
+/// protocol are version-specific) — hence one shared provisioner.
+pub(crate) fn resolve_fc_jailer() -> Result<PathBuf> {
+    if let Ok(path) = std::env::var("MYCEL_FC_JAILER_BIN") {
+        let path = PathBuf::from(path);
+        if is_executable(&path) {
+            return Ok(path);
+        }
+        return Err(BackendError::Unavailable(format!(
+            "MYCEL_FC_JAILER_BIN={}: not an executable file",
+            path.display()
+        )));
+    }
+    let cache = vm_assets_cache().join("jailer");
+    if is_executable(&cache) {
+        return Ok(cache);
+    }
+    eprintln!(
+        "[myc-vm] jailer missing — downloading once from the upstream {FC_RELEASE_TAG} \
+         release into {} (override with MYCEL_FC_JAILER_BIN)",
+        cache.display()
+    );
+    install_release_binary("jailer")
 }
 
 /// True when `path` starts with the ELF magic (0x7f "ELF").
@@ -1043,6 +1134,8 @@ struct AttemptCtx<'a> {
     snapdir: &'a Path,
     payload: &'a str,
     trace: bool,
+    /// Jailer binary when this run is jailed (`MYCEL_FC_JAILER=1`).
+    jailer_bin: Option<&'a Path>,
 }
 
 /// Everything a started snapshot run holds; `release()` (also via Drop)
@@ -1060,6 +1153,9 @@ struct FcRun {
     console_stop: Arc<AtomicBool>,
     run_dir: Option<tempfile::TempDir>,
     lock: Option<SnapshotLock>,
+    /// Jail tree of a `MYCEL_FC_JAILER=1` run (under `<snapshots>/jails/`);
+    /// removed on release.
+    jail_tree: Option<PathBuf>,
     released: bool,
 }
 
@@ -1116,9 +1212,16 @@ impl FcRun {
             detach_tap(lease);
             release_lease(net, lease, &self.state_dir);
         }
-        // 6. Snapshot lock claim.
+        // 6. Snapshot lock claim + jail tree.
         self.lock = None; // Drop removes it
-                          // 7. State dir last (MYCEL_VM_KEEP keeps it for post-mortem).
+        if let Some(tree) = self.jail_tree.take() {
+            if std::env::var("MYCEL_VM_KEEP").ok().as_deref() == Some("1") {
+                eprintln!("[myc-vm] jail tree kept: {}", tree.display());
+            } else {
+                let _ = std::fs::remove_dir_all(tree);
+            }
+        }
+        // 7. State dir last (MYCEL_VM_KEEP keeps it for post-mortem).
         if std::env::var("MYCEL_VM_KEEP").ok().as_deref() == Some("1") {
             eprintln!("[myc-vm] state dir kept: {}", self.state_dir.display());
         } else {
@@ -1134,32 +1237,199 @@ impl Drop for FcRun {
 }
 
 /// The Firecracker tap is host-created (unlike Cloud Hypervisor, which
-/// creates it itself; the host then attaches it to the bridge).
-fn create_tap(lease: &Lease) -> bool {
-    crate::kvm::ip_run(&["tuntap", "add", "dev", &lease.tap, "mode", "tap"])
+/// creates it itself; the host then attaches it to the bridge). Jailed
+/// runs pass `user <uid>`: TUNSETIFF from the privilege-dropped VMM (no
+/// CAP_NET_ADMIN) is only accepted for the tap's owner — measured:
+/// owner uid attaches, any other uid gets EPERM.
+fn create_tap(lease: &Lease, owner_uid: Option<u32>) -> bool {
+    let owner = owner_uid.map(|u| u.to_string());
+    let mut add: Vec<&str> = vec!["tuntap", "add", "dev", &lease.tap, "mode", "tap"];
+    if let Some(o) = owner.as_deref() {
+        add.extend(["user", o]);
+    }
+    crate::kvm::ip_run(&add)
         && crate::kvm::ip_run(&["link", "set", &lease.tap, "master", BRIDGE_NAME])
         && crate::kvm::ip_run(&["link", "set", &lease.tap, "up"])
 }
 
-fn spawn_fc(fc_bin: &Path, state_dir: &Path) -> Result<(Child, PathBuf)> {
-    let socket = state_dir.join("api.sock");
-    // Firecracker refuses to bind an existing socket path — a retry in the
-    // same state dir (restore rejected -> cold boot) must clear it first.
-    let _ = std::fs::remove_file(&socket);
+/// Hard link when the source and destination share a filesystem (instant
+/// for the 512 MiB `mem.img`), plain copy otherwise (cross-device
+/// snapshot root). Both leave the same content at both paths.
+fn link_or_copy(src: &Path, dst: &Path) -> Result<()> {
+    if std::fs::hard_link(src, dst).is_ok() {
+        return Ok(());
+    }
+    std::fs::copy(src, dst)?;
+    Ok(())
+}
+
+/// The per-run jail of a `MYCEL_FC_JAILER=1` run: host view of the
+/// chroot the jailer builds at `<base>/<exec-file-name>/<id>/root`
+/// (v1.17 layout — the jailer appends the exec file's name, the id and
+/// `root`, and is tolerant of pre-created directories, which is how the
+/// guest assets get in: they are hard-linked into `<root>/run/` BEFORE
+/// the jailer starts, at stable `/run/<name>` paths).
+struct Jail {
+    /// Host path of the jailer binary.
+    jailer: PathBuf,
+    /// `--chroot-base-dir` (must exist before the jailer starts). MUST be
+    /// on a filesystem that allows device nodes (the jailer mknods
+    /// /dev/kvm and /dev/net/tun inside the tree): /tmp is typically
+    /// tmpfs mounted `nodev`, where every mknod'd device node fails to
+    /// open with EACCES for everyone, root included — measured on WSL2.
+    /// `<snapshots_root>/jails` keeps the jail on the same device as the
+    /// snapshot cache (instant hard links) and off /tmp.
+    base: PathBuf,
+    /// `--id` (one run = one jail tree).
+    id: String,
+    /// `<base>/<fc-file-name>/<id>` — everything this run created;
+    /// removed on release.
+    tree: PathBuf,
+    /// `<tree>/root` — the host path of the chroot.
+    root: PathBuf,
+}
+
+impl Jail {
+    /// Build the jail tree and link the given host files in. The links
+    /// are chowned to the jailed account with mode 0644: the VMM (uid
+    /// 20000) needs to read every asset and write the scratch/mem/vmstate
+    /// inodes, while the host engine (root) keeps writing the scratch
+    /// through the snapshot-dir link of the same inode.
+    fn prepare(
+        jailer: &Path,
+        fc_bin: &Path,
+        base: &Path,
+        id: &str,
+        files: &[PathBuf],
+    ) -> Result<Self> {
+        let tree = base
+            .join(fc_bin.file_name().unwrap_or_else(|| "firecracker".as_ref()))
+            .join(id);
+        let root = tree.join("root");
+        std::fs::create_dir_all(root.join("run"))?;
+        for src in files {
+            let Some(name) = src.file_name() else {
+                continue;
+            };
+            let dst = root.join("run").join(name);
+            let _ = std::fs::remove_file(&dst);
+            link_or_copy(src, &dst)?;
+            let _ = std::os::unix::fs::chown(&dst, Some(JAILER_UID), Some(JAILER_GID));
+            let _ = std::fs::set_permissions(&dst, std::fs::Permissions::from_mode(0o644));
+        }
+        Ok(Self {
+            jailer: jailer.to_path_buf(),
+            base: base.to_path_buf(),
+            id: id.to_string(),
+            tree,
+            root,
+        })
+    }
+
+    /// Host path of the jail's copy of a guest asset.
+    fn host_path(&self, jailed_name: &str) -> PathBuf {
+        self.root.join("run").join(jailed_name)
+    }
+
+    /// The API socket FC binds inside the jail (its default location;
+    /// `--api-sock` is not passed — the jailed path is fixed).
+    fn api_socket(&self) -> PathBuf {
+        self.host_path("firecracker.socket")
+    }
+
+    /// Host path of the Firecracker log (passed as `/run/fc.log` to the
+    /// VMM via the jailer's `--` pass-through).
+    fn fc_log(&self) -> PathBuf {
+        self.host_path("fc.log")
+    }
+}
+
+/// Path one API request should reference for a host file: jailed runs
+/// see the hard link at `/run/<name>` (the vmstate EMBEDS these paths —
+/// they must be identical at snapshot and restore time), direct runs the
+/// host path.
+fn vm_path(jail: Option<&Jail>, host: &Path) -> String {
+    match jail {
+        Some(_) => format!(
+            "/run/{}",
+            host.file_name().unwrap_or_default().to_string_lossy()
+        ),
+        None => host.display().to_string(),
+    }
+}
+
+/// After a jailed cold boot wrote `/run/vmstate.bin` + `/run/mem.img`
+/// inside the jail, link them back out into the snapshot cache (the
+/// cache is what `SnapshotFiles::complete` checks and what the next
+/// restore links IN from).
+fn jail_export_snapshot(jail: &Jail, snapdir: &Path) -> Result<()> {
+    for name in ["vmstate.bin", "mem.img"] {
+        let dst = snapdir.join(name);
+        let _ = std::fs::remove_file(&dst);
+        link_or_copy(&jail.host_path(name), &dst)?;
+    }
+    Ok(())
+}
+
+fn spawn_fc(fc_bin: &Path, state_dir: &Path, jail: Option<&Jail>) -> Result<(Child, PathBuf)> {
+    let Some(jail) = jail else {
+        // Direct path (default): the engine supervises Firecracker itself.
+        let socket = state_dir.join("api.sock");
+        // Firecracker refuses to bind an existing socket path — a retry in the
+        // same state dir (restore rejected -> cold boot) must clear it first.
+        let _ = std::fs::remove_file(&socket);
+        let console = std::fs::File::create(state_dir.join("console.log"))?;
+        let child = Command::new(fc_bin)
+            .arg("--api-sock")
+            .arg(&socket)
+            .arg("--log-path")
+            .arg(state_dir.join("fc.log"))
+            .arg("--level")
+            .arg("Warning")
+            .stdin(Stdio::null())
+            .stdout(Stdio::from(console.try_clone()?))
+            .stderr(Stdio::from(console))
+            .spawn()
+            .map_err(|e| BackendError::Unavailable(format!("spawn firecracker: {e}")))?;
+        return Ok((child, socket));
+    };
+    // Jailed path: without --daemonize and --new-pid-ns the jailer execve's
+    // the VMM, so the spawned pid IS Firecracker (SIGTERM/wait/kill keep
+    // their direct-path semantics). No --netns (v1.17 has no --net-tap
+    // anymore): the VMM keeps the host network namespace, so the host-managed
+    // tap/bridge setup works unchanged. No --cgroup: the jailer only touches
+    // cgroups when limits are passed, and WSL2 cgroup v2 has no delegation.
     let console = std::fs::File::create(state_dir.join("console.log"))?;
-    let child = Command::new(fc_bin)
-        .arg("--api-sock")
-        .arg(&socket)
+    // process_group(0): the VMM leaves the engine's foreground process
+    // group. Kernel-delivered SIGHUPs (session-leader exit / controlling
+    // terminal hangup — WSL's ConPTY churns those; measured: the jailed
+    // VMM received `SIGHUP {si_code=SI_KERNEL}` seconds after spawn and
+    // exited 156) target the foreground group; myc swallows them via its
+    // ctrlc handler, but Firecracker's own SIGHUP handler shuts the VM
+    // down. The jailer plays the same trick (setsid) for --new-pid-ns.
+    let child = Command::new(&jail.jailer)
+        .process_group(0)
+        .arg("--id")
+        .arg(&jail.id)
+        .arg("--exec-file")
+        .arg(fc_bin)
+        .arg("--uid")
+        .arg(JAILER_UID.to_string())
+        .arg("--gid")
+        .arg(JAILER_GID.to_string())
+        .arg("--chroot-base-dir")
+        .arg(&jail.base)
+        .arg("--")
         .arg("--log-path")
-        .arg(state_dir.join("fc.log"))
+        .arg("/run/fc.log")
         .arg("--level")
         .arg("Warning")
         .stdin(Stdio::null())
         .stdout(Stdio::from(console.try_clone()?))
         .stderr(Stdio::from(console))
         .spawn()
-        .map_err(|e| BackendError::Unavailable(format!("spawn firecracker: {e}")))?;
-    Ok((child, socket))
+        .map_err(|e| BackendError::Unavailable(format!("spawn jailer: {e}")))?;
+    Ok((child, jail.api_socket()))
 }
 
 /// Wait for the ready marker on the guest serial console (cold boot only).
@@ -1205,12 +1475,117 @@ fn console_tail(console: &Path, lines: usize) -> String {
 /// workload exit code, or a classified failure.
 fn run_vm(g: &mut FcRun, mode: Mode, ctx: &AttemptCtx) -> AttemptResult {
     let t_spawn = Instant::now();
-    let (child, socket) = spawn_fc(ctx.fc_bin, &g.state_dir)?;
+    // A previous attempt in the same run (cold retry after a rejected
+    // restore) may have left a live VMM — overwriting the handle would
+    // leak the process (measured: idle Firecrackers survived their run).
+    if let Some(vm) = g.vm.as_mut() {
+        vm.kill();
+    }
+    g.vm = None;
+    // Jailed runs: build the jail tree first (hard links of everything the
+    // VM must see at stable /run names), then launch through the jailer.
+    // The jail tree is registered on the run guard — release() removes it.
+    let jail = match ctx.jailer_bin {
+        None => None,
+        Some(jailer) => {
+            let mut files = vec![
+                SnapshotFiles::rootfs(ctx.snapdir),
+                SnapshotFiles::scratch(ctx.snapdir),
+            ];
+            match mode {
+                Mode::Cold => {
+                    files.push(ctx.fc_kernel.to_path_buf());
+                    files.push(ctx.initramfs.to_path_buf());
+                }
+                Mode::Restore => {
+                    files.push(SnapshotFiles::vmstate(ctx.snapdir));
+                    files.push(SnapshotFiles::mem(ctx.snapdir));
+                }
+            }
+            // One id per attempt: a cold retry after a rejected restore
+            // builds a fresh tree instead of fighting the previous links.
+            // Kept SHORT — the API socket lives at
+            // <base>/<exec>/<id>/root/run/firecracker.socket and a unix
+            // socket path is capped at 107 bytes (sun_path).
+            let id = g
+                .state_dir
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(|n| n.trim_start_matches("myc-vm-fc-"))
+                .map(|n| n.to_string())
+                .unwrap_or_else(|| format!("{}", std::process::id()));
+            // The jail lives under the snapshots root when that keeps the
+            // socket path short enough (same filesystem as the cache =
+            // instant hard links; never /tmp: tmpfs is usually mounted
+            // `nodev`, and a device node that cannot be opened kills the
+            // jailed VMM with EACCES — measured). A deep snapshot root
+            // (hermetic benches inside the worktree) overflows sun_path —
+            // measured as `path must be shorter than SUN_LEN` on every
+            // connect — so the jail then falls back to <home>/.mycel/jails.
+            let exec_name = ctx
+                .fc_bin
+                .file_name()
+                .unwrap_or_else(|| "firecracker".as_ref());
+            let socket_fits = |base: &Path| {
+                base.join(exec_name)
+                    .join(&id)
+                    .join("root")
+                    .join("run")
+                    .join("firecracker.socket")
+                    .as_os_str()
+                    .len()
+                    <= 100 // margin under the 107-byte sun_path cap
+            };
+            let preferred = ctx
+                .snapdir
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .join("jails");
+            let jail_base = if socket_fits(&preferred) {
+                preferred
+            } else {
+                let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+                let fallback = Path::new(&home).join(".mycel").join("jails");
+                if !socket_fits(&fallback) {
+                    return Err(BackendError::Unavailable(
+                        "no jail location keeps the firecracker API socket under the 107-byte \
+                         unix sun_path cap (deep $HOME?)"
+                            .into(),
+                    )
+                    .into());
+                }
+                fallback
+            };
+            // A failed jail preparation must never degrade into a direct
+            // (un-jailed) launch — error out; the caller falls back to the
+            // Cloud Hypervisor path, not to un-jailed Firecracker.
+            let jail = Jail::prepare(jailer, ctx.fc_bin, &jail_base, &id, &files).map_err(|e| {
+                BackendError::Unavailable(format!(
+                    "jail preparation failed: {e} (check that the jail base lives on a \
+                     filesystem that allows device nodes — not a `nodev` tmpfs)"
+                ))
+            })?;
+            let tree = jail.tree.clone();
+            g.jail_tree = Some(tree);
+            Some(jail)
+        }
+    };
+    let (child, socket) = spawn_fc(ctx.fc_bin, &g.state_dir, jail.as_ref())?;
+    let fc_log = jail
+        .as_ref()
+        .map(|j| j.fc_log())
+        .unwrap_or_else(|| g.state_dir.join("fc.log"));
     let mut child = child;
     if !wait_fc_api(&socket, &mut child, API_WAIT) {
+        // The VMM may still be alive (slow start) — a dropped Child handle
+        // kills nothing, and a leaked jailed Firecracker was measured in
+        // exactly this corner. Kill before giving up.
+        let _ = child.kill();
+        let _ = child.wait();
         return Err(BackendError::Unavailable(format!(
-            "firecracker API never answered (log: {})",
-            g.state_dir.join("fc.log").display()
+            "firecracker API never answered (log: {}; console: {})",
+            fc_log.display(),
+            g.state_dir.join("console.log").display()
         ))
         .into());
     }
@@ -1230,7 +1605,13 @@ fn run_vm(g: &mut FcRun, mode: Mode, ctx: &AttemptCtx) -> AttemptResult {
         Mode::Restore => {
             let vmstate = SnapshotFiles::vmstate(ctx.snapdir);
             let mem = SnapshotFiles::mem(ctx.snapdir);
-            if let Err(e) = g.vm.as_ref().unwrap().load_snapshot(&vmstate, &mem) {
+            // The API must reference the jailed /run names; the vmstate
+            // itself re-opens the drives by the paths recorded at snapshot
+            // time, which are the same /run names (jailer=1 is its own
+            // snapshot epoch).
+            let vmstate_arg = PathBuf::from(vm_path(jail.as_ref(), &vmstate));
+            let mem_arg = PathBuf::from(vm_path(jail.as_ref(), &mem));
+            if let Err(e) = g.vm.as_ref().unwrap().load_snapshot(&vmstate_arg, &mem_arg) {
                 // A refused load = corrupt or version-drifted snapshot.
                 let mut err: AttemptErr = e.into();
                 err.reject_restore = true;
@@ -1249,8 +1630,8 @@ fn run_vm(g: &mut FcRun, mode: Mode, ctx: &AttemptCtx) -> AttemptResult {
                     .unwrap_or_default()
             );
             let boot = serde_json::json!({
-                "kernel_image_path": ctx.fc_kernel.display().to_string(),
-                "initrd_path": ctx.initramfs.display().to_string(),
+                "kernel_image_path": vm_path(jail.as_ref(), ctx.fc_kernel),
+                "initrd_path": vm_path(jail.as_ref(), ctx.initramfs),
                 "boot_args": boot_args,
             });
             let machine = serde_json::json!({
@@ -1260,13 +1641,13 @@ fn run_vm(g: &mut FcRun, mode: Mode, ctx: &AttemptCtx) -> AttemptResult {
             });
             let rootfs_drive = serde_json::json!({
                 "drive_id": "rootfs",
-                "path_on_host": SnapshotFiles::rootfs(ctx.snapdir).display().to_string(),
+                "path_on_host": vm_path(jail.as_ref(), &SnapshotFiles::rootfs(ctx.snapdir)),
                 "is_root_device": true,
                 "is_read_only": true,
             });
             let scratch_drive = serde_json::json!({
                 "drive_id": "scratch",
-                "path_on_host": SnapshotFiles::scratch(ctx.snapdir).display().to_string(),
+                "path_on_host": vm_path(jail.as_ref(), &SnapshotFiles::scratch(ctx.snapdir)),
                 "is_root_device": false,
                 "is_read_only": false,
             });
@@ -1312,16 +1693,24 @@ fn run_vm(g: &mut FcRun, mode: Mode, ctx: &AttemptCtx) -> AttemptResult {
                 return Err(e.into());
             }
             let t_create = Instant::now();
-            if let Err(e) = vm.snapshot_full(
-                &SnapshotFiles::vmstate(ctx.snapdir),
-                &SnapshotFiles::mem(ctx.snapdir),
-            ) {
+            let vmstate_arg =
+                PathBuf::from(vm_path(jail.as_ref(), &SnapshotFiles::vmstate(ctx.snapdir)));
+            let mem_arg = PathBuf::from(vm_path(jail.as_ref(), &SnapshotFiles::mem(ctx.snapdir)));
+            if let Err(e) = vm.snapshot_full(&vmstate_arg, &mem_arg) {
                 return Err(e.into());
+            }
+            if let Some(jail) = jail.as_ref() {
+                // FC wrote /run/vmstate.bin + /run/mem.img inside the jail;
+                // the cache owns them from now on (hard link = same inode).
+                if let Err(e) = jail_export_snapshot(jail, ctx.snapdir) {
+                    return Err(e.into());
+                }
             }
             SnapshotFiles::meta_write(ctx.snapdir, ctx.fc_version, ctx.mem_mib);
             eprintln!(
-                "[myc-vm] cold boot, snapshot saved (creation {} ms)",
-                t_create.elapsed().as_millis()
+                "[myc-vm] cold boot, snapshot saved (creation {} ms{})",
+                t_create.elapsed().as_millis(),
+                if jail.is_some() { ", jailed" } else { "" }
             );
         }
     }
@@ -1562,6 +1951,23 @@ pub fn snapshot_run(
         Ok(p) => p,
         Err(e) => return unavail(e.to_string()),
     };
+    // --- jailer gate (MYCEL_FC_JAILER=1) ------------------------------
+    // Root is required (chroot, mknod inside the jail, tap ownership);
+    // anything missing degrades to the regular paths, never to an
+    // un-jailed Firecracker when the operator asked for the jailer.
+    let jailer_bin = if std::env::var("MYCEL_FC_JAILER").ok().as_deref() == Some("1") {
+        if !is_root() {
+            return unavail(
+                "MYCEL_FC_JAILER=1 needs root (chroot, mknod and tap ownership)".into(),
+            );
+        }
+        match resolve_fc_jailer() {
+            Ok(p) => Some(p),
+            Err(e) => return unavail(e.to_string()),
+        }
+    } else {
+        None
+    };
     let fc_kernel = match resolve_fc_kernel(engine) {
         Ok(p) => p,
         Err(e) => return unavail(e.to_string()),
@@ -1632,6 +2038,7 @@ pub fn snapshot_run(
         console_stop: Arc::new(AtomicBool::new(false)),
         run_dir: None,
         lock: None,
+        jail_tree: None,
         released: false,
     };
     if with_net {
@@ -1646,7 +2053,7 @@ pub fn snapshot_run(
             Ok(l) => l,
             Err(e) => return unavail(e.to_string()),
         };
-        if !create_tap(&lease) {
+        if !create_tap(&lease, jailer_bin.is_some().then_some(JAILER_UID)) {
             return unavail(format!("cannot create tap {} (root?)", lease.tap));
         }
         // Permanent neighbour entry before the guest even exists — the
@@ -1693,24 +2100,37 @@ pub fn snapshot_run(
         .as_ref()
         .map(|l| l.ip_str.clone())
         .unwrap_or_else(|| "nonet".into());
-    let fp = fingerprint(&[
-        b"myc-fc-snapshot-v1",
-        env!("CARGO_PKG_VERSION").as_bytes(),
-        AGENT_PROTOCOL.to_string().as_bytes(),
-        kernel_sha.as_bytes(),
-        initrd_sha.as_bytes(),
-        agent_sha.as_bytes(),
-        id.as_bytes(),
-        request.binds.join(";").as_bytes(),
-        request.hostname.as_bytes(),
-        if request.isolated_network {
-            b"isolated=1"
-        } else {
-            b"isolated=0"
-        },
-        mem_mib.to_string().as_bytes(),
-        lease_ip.as_bytes(),
-    ]);
+    // Snapshot epoch: a jailed snapshot embeds /run/... drive paths (the
+    // vmstate re-opens drives by the paths the VM saw), a direct one the
+    // host paths — they are NOT interchangeable. The jailer=1 part is
+    // only added when jailed so existing default-mode caches survive.
+    let proto_str = AGENT_PROTOCOL.to_string();
+    let binds_str = request.binds.join(";");
+    let mem_str = mem_mib.to_string();
+    let fp = fingerprint(&{
+        let mut parts: Vec<&[u8]> = vec![
+            b"myc-fc-snapshot-v1",
+            env!("CARGO_PKG_VERSION").as_bytes(),
+            proto_str.as_bytes(),
+            kernel_sha.as_bytes(),
+            initrd_sha.as_bytes(),
+            agent_sha.as_bytes(),
+            id.as_bytes(),
+            binds_str.as_bytes(),
+            request.hostname.as_bytes(),
+            if request.isolated_network {
+                b"isolated=1"
+            } else {
+                b"isolated=0"
+            },
+            mem_str.as_bytes(),
+            lease_ip.as_bytes(),
+        ];
+        if jailer_bin.is_some() {
+            parts.push(b"jailer=1");
+        }
+        parts
+    });
     let snapdir = snapshots_root().join(&fp);
     if let Err(e) = std::fs::create_dir_all(&snapdir) {
         return unavail(format!("cannot create {}: {e}", snapdir.display()));
@@ -1777,6 +2197,7 @@ pub fn snapshot_run(
         snapdir: &snapdir,
         payload: &payload,
         trace,
+        jailer_bin: jailer_bin.as_deref(),
     };
     let t0 = Instant::now();
     let code = loop {
@@ -2020,6 +2441,74 @@ mod tests {
             file_sha256_cached_in(&root, &asset).unwrap(),
             sha256_hex_of(b"third-content")
         );
+    }
+
+    #[test]
+    fn vm_path_is_run_name_when_jailed() {
+        let dir = tempfile::tempdir().unwrap();
+        let jail = Jail {
+            jailer: PathBuf::from("/bin/jailer"),
+            base: dir.path().join("jail"),
+            id: "t1".into(),
+            tree: dir.path().join("jail/firecracker/t1"),
+            root: dir.path().join("jail/firecracker/t1/root"),
+        };
+        let host = Path::new("/home/x/.mycel/snapshots/abc/rootfs.ext4");
+        assert_eq!(
+            vm_path(None, host),
+            "/home/x/.mycel/snapshots/abc/rootfs.ext4"
+        );
+        assert_eq!(vm_path(Some(&jail), host), "/run/rootfs.ext4");
+    }
+
+    #[test]
+    fn jail_prepare_links_assets_under_run() {
+        use std::os::unix::fs::MetadataExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let fc = tmp.path().join("firecracker");
+        std::fs::write(&fc, b"X").unwrap();
+        let asset = tmp.path().join("kernel.elf");
+        std::fs::write(&asset, b"KERNEL").unwrap();
+        let jail = Jail::prepare(
+            Path::new("/bin/true"),
+            &fc,
+            &tmp.path().join("jail"),
+            "id9",
+            std::slice::from_ref(&asset),
+        )
+        .unwrap();
+        // v1.17 layout: <base>/<exec-file-name>/<id>/root.
+        assert_eq!(jail.root, tmp.path().join("jail/firecracker/id9/root"));
+        assert_eq!(jail.api_socket(), jail.root.join("run/firecracker.socket"));
+        let linked = jail.host_path("kernel.elf");
+        assert_eq!(std::fs::read(&linked).unwrap(), b"KERNEL");
+        // The link is the same inode as the source (no copy).
+        assert_eq!(
+            std::fs::metadata(&asset).unwrap().ino(),
+            std::fs::metadata(&linked).unwrap().ino()
+        );
+    }
+
+    #[test]
+    fn jail_export_snapshot_replaces_stale_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("jail/firecracker/t/root");
+        std::fs::create_dir_all(root.join("run")).unwrap();
+        std::fs::write(root.join("run/vmstate.bin"), b"VMS").unwrap();
+        std::fs::write(root.join("run/mem.img"), b"MEM").unwrap();
+        let snap = tmp.path().join("snap");
+        std::fs::create_dir_all(&snap).unwrap();
+        std::fs::write(snap.join("vmstate.bin"), b"STALE").unwrap();
+        let jail = Jail {
+            jailer: PathBuf::new(),
+            base: tmp.path().join("jail"),
+            id: "t".into(),
+            tree: root.parent().unwrap().to_path_buf(),
+            root,
+        };
+        jail_export_snapshot(&jail, &snap).unwrap();
+        assert_eq!(std::fs::read(snap.join("vmstate.bin")).unwrap(), b"VMS");
+        assert_eq!(std::fs::read(snap.join("mem.img")).unwrap(), b"MEM");
     }
 
     #[test]
