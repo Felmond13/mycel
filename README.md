@@ -283,12 +283,18 @@ natively on the Windows host — store-only commands work
 still need Linux. Build: `scripts/build-windows.ps1`. Test:
 `scripts/e2e-windows.ps1`.
 
-**macOS — planned, not yet available.** The code compiles (all platform
-fixes are `cfg`-based) but the runtime honestly returns "not yet
-available". The plan — a lightweight pinned-kernel Linux VM via
-Virtualization.framework with virtiofs store sharing, same transparent-twin
-UX as Windows — is written up in
-[docs/desktop-architecture.md](docs/desktop-architecture.md).
+**macOS — implemented, EXPERIMENTAL, unvalidated on hardware.** The
+`hvf-microvm` engine (libkrun over Hypervisor.framework, the same
+library `crun --krun` uses) is written, type-checked for both
+`aarch64-apple-darwin` and `x86_64-apple-darwin`, and its pure planning
+logic is unit-tested on Linux — but **no Apple hardware exists in this
+project's CI: nothing has been booted, run or measured**, so the probe
+only reports the engine available when `MYCEL_VM_EXPERIMENTAL=1` is set
+AND a `libkrun.dylib` is found, and it stays out of the automatic engine
+choice. Runs are network-less in v1 (no binds, no `-p`). Validation
+checklist for Mac owners:
+[bench/macos-libkrun/NOTES.md](bench/macos-libkrun/NOTES.md); design in
+[docs/isolation-engines.md](docs/isolation-engines.md).
 
 ## Quick start
 
@@ -627,8 +633,11 @@ doctor` prints the detected tiers and the default it would pick):
 - **`wsl2-twin`** — Windows ships a transparent proxy into a Linux twin
   inside WSL2 (one store, one feature set); the twin then applies the
   same Linux policy.
-- **`hvf-microvm`** — the macOS plan (Virtualization.framework), architecture
-  only for now.
+- **`hvf-microvm`** — macOS: a real microVM via libkrun over
+  Hypervisor.framework. Implemented and type-checked, but EXPERIMENTAL
+  and **unvalidated on Apple hardware** (no boot, no e2e, no numbers):
+  requires `MYCEL_VM_EXPERIMENTAL=1` plus a `libkrun.dylib`, network-less
+  in v1 — see [bench/macos-libkrun/NOTES.md](bench/macos-libkrun/NOTES.md).
 
 Stacks (`myc up`, web stacks) run on namespaces by construction — their
 services reach each other over the host network or the pod's private one.
@@ -686,9 +695,10 @@ builds (`myc build`, declarative adds + exec steps, no Dockerfile).
 
 Not yet implemented (by design, in order):
 
-1. macOS micro-VM backend (today: Windows ships the transparent WSL2
-   proxy — see *Windows & macOS*; macOS is architecture-only,
-   `docs/desktop-architecture.md`)
+1. macOS micro-VM backend validation (the `hvf-microvm` engine is
+   implemented and type-checked but unvalidated on Apple hardware —
+   see *Windows & macOS* and `bench/macos-libkrun/NOTES.md`; networking,
+   binds and published ports come after the first real boot)
 2. Hub: TLS termination and per-user tokens (today: one write token,
    put nginx/caddy in front for TLS)
 

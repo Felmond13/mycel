@@ -7,7 +7,7 @@ and `myc doctor` prints the detected tiers so the choice is never a mystery.
 | Tier | Engine (`myc doctor`) | Isolation | Status |
 |---|---|---|---|
 | Linux + KVM | `kvm-microvm` (Cloud Hypervisor driven by `myc-backend`) | **own kernel** — a container escape never shares the host kernel | **READY — Linux default**: `myc run` picks it automatically whenever it is complete and the request is compatible (see the auto policy below); validated `bench/microvm/e2e-vm.sh` 27/27 |
-| macOS | `hvf-microvm` (Virtualization.framework plan) | own kernel | architecture only (`docs/desktop-architecture.md`) |
+| macOS | `hvf-microvm` (libkrun over Hypervisor.framework, `myc-backend/src/vm.rs`) | **own kernel** — a container escape never shares the host kernel | **EXPERIMENTAL — implemented + type-checked, UNVALIDATED on Apple hardware**: requires `MYCEL_VM_EXPERIMENTAL=1` + `libkrun.dylib`; network-less v1 (section below, `bench/macos-libkrun/NOTES.md`) |
 | Windows | `wsl2-twin` (transparent proxy into WSL2) | containers execute inside the Linux twin | shipped |
 | Any Linux | `native-namespaces` (user namespaces, `myc-run`) | **shared kernel** — Docker-level, not better | the fallback (and the only tier for pods, interactive runs and pasta isolation); carries the full feature set (binds, volumes, ports, pods) |
 
@@ -146,6 +146,82 @@ falls back to namespaces for them, with the reason on stderr); PID 1 does
 not reap orphaned grandchildren; a SIGKILLed `myc` bypasses cleanup
 (SIGINT/SIGTERM are handled and tear everything down).
 
+## The `hvf-microvm` engine (macOS, EXPERIMENTAL)
+
+The macOS tier is real code now (`crates/myc-backend/src/vm.rs`), written
+against libkrun v1.19.x — the same VMM library `crun --krun` embeds, and
+the long-term vehicle of choice because one library covers KVM on Linux
+and Hypervisor.framework on macOS. It is also the project's most
+honest tier: **nothing has been executed on Apple hardware** (the whole
+tier was written and checked from a Windows/WSL2 workstation), so the
+probe never claims more than "present + opt-in", `complete` stays false,
+and the automatic `auto` policy can therefore never pick it. Explicit
+use only:
+
+```bash
+brew tap libkrun/krun && brew install krunkit   # ships libkrun.dylib (or: sudo port install libkrun)
+export MYCEL_VM_EXPERIMENTAL=1
+myc doctor                                      # per-check honesty, including UNVALIDATED
+myc run --engine hvf-microvm alpine:3.20 -- echo hello
+```
+
+Design (mirrors `crun krun`, the reference embedder):
+
+- **Kernel**: direct kernel boot with the SAME published release assets
+  as the kvm engine — `vmlinux-vmfs-aarch64` on arm64 Macs, `vmlinux-vmfs`
+  on x86_64 (`krun_set_kernel`, format RAW; auto-provisioned from
+  `~/.mycel/vm-assets/` exactly like the Linux tier). No kernel ships
+  inside libkrun 1.19.x.
+- **Rootfs**: the materialized rootfs directory is shared as the guest
+  root over **virtiofs in-process** (`krun_set_root`) — zero copy, no
+  host daemon (no virtiofsd needed; libkrun implements the device
+  itself). This is the kvm engine's "voie B", natively.
+- **Init**: libkrun injects its own built-in init (`/init.krun`) into the
+  root share — no initramfs in this model.
+- **Workload**: `krun_set_exec(path, argv, envp)` + `krun_set_workdir`;
+  stdio is taken over by `krun_start_enter`, which wires the workload's
+  stdin/stdout/stderr to the host terminal (virtio-console ports).
+- **Exit code**: `krun_start_enter` runs the guest IN-PROCESS and calls
+  `exit()` with the workload's exit code when the guest powers off — on
+  success `Vm::run` never returns; the `myc` process itself exits with
+  the container's code (125/126/127 are libkrun's init error codes).
+  This is precisely `crun krun`'s behavior.
+
+What works by construction (but is UNVALIDATED): the whole
+RunRequest→libkrun mapping — command override, env layering
+(defaults → image ENV → `-e`), workdir, exec resolution against the
+guest PATH, guest RAM/vCPUs (`MYCEL_VM_MEM`, `MYCEL_VM_CPUS`).
+
+What is refused, with actionable errors (never silently dropped):
+bind mounts (libkrun 1.19.x has no guest-mount API for extra virtiofs
+shares — carrying them needs a custom initramfs, like the kvm tier's
+`/myc/init-guest`); published ports (the tier is network-less in v1).
+Ignored and documented: hostname, `--map-user` (no libkrun API for UTS
+namespaces or uid maps).
+
+Networking (design, not wired): macOS has no `/dev/kvm` and no tap —
+libkrun's macOS backends are `krun_add_net_unixstream` (passt-style) and
+`krun_add_net_unixgram` (gvproxy / socket_vmnet); TSI (vsock socket
+impersonation, zero-config host networking) needs a guest kernel with
+`VIRTIO_VSOCK`, which the published vmfs kernels do not build in. The
+gvproxy path is the documented plan for v2 (see NOTES.md).
+
+Guards (structural honesty):
+
+- `probe()`/`run()` gate on ALL of: `libkrun.dylib` found
+  (`MYCEL_VM_LIBKRUN` override; Homebrew arm64/Intel + MacPorts search
+  paths), guest kernel present, and `MYCEL_VM_EXPERIMENTAL=1` — one
+  actionable error per missing factor.
+- `myc doctor` shows an explicit "hardware validation: UNVALIDATED" row
+  and a Hypervisor.framework entitlement note (HVF needs root or a
+  binary signed with `com.apple.vm.hypervisor` — a likely first-boot
+  failure mode on an unsigned binary).
+- The pure planning logic (`plan_run`, availability, exec resolution,
+  config parsing) is platform-independent and unit-tested on Linux;
+  the macOS code is type-checked (and clippy-clean) for BOTH
+  `aarch64-apple-darwin` and `x86_64-apple-darwin` from the Linux CI
+  host via a zig-cc cross toolchain.
+
 ## microVM boot benchmark (`bench/microvm`)
 
 Same static musl binary (`benchhttp.rs`, std-only) everywhere: a `FROM
@@ -200,7 +276,7 @@ never edited after publication).
 | Windows (WSL2) | Firecracker v1.17 snapshot/restore | **viable, measured** (`bench/snapshot-wsl2`): boot 389 ms median; snapshot create 614 ms (512 MiB); restore **10/10 alive, 91 ms median, 161 ms p95** (T0 process launch → first byte of `200`, resume included; liveness = console heartbeat + HTTP) |
 | Windows (WSL2) | CH v54 restore | inert (0 interrupts; 3 memory modes) — dead end on WSL2-KVM |
 | Any platform (fallback) | warm pool (`bench/warm-pool`) | **measured**: handoff **28 ms median / 61 ms p95** vs cold boot **299 ms median** (n=30 each, same harness, slim kernel) — ×10.7; works everywhere (processes + taps only, no vCPU save/restore); limits: 1 ready guest per resident VM, refill = background cold boot, N × 512 MiB resident |
-| macOS (HVF) | plan | libkrun has no snapshot API → warm pool as stopgap; Hypervisor.framework suspend/resume to be investigated |
+| macOS (HVF) | libkrun | engine implemented (EXPERIMENTAL); no snapshot API in libkrun → warm pool as stopgap; Hypervisor.framework suspend/resume to be investigated |
 
 Bottom line: the Windows path exists — **Firecracker snapshot/restore
 under WSL2 lands sub-200 ms with a live guest** — and the **warm pool** is
@@ -218,8 +294,12 @@ machine). Raw measurement files live in each bench `results/` directory
    KVM. ~~Guest egress NAT~~ **done** — root runs are networked without
    published ports (default route + MASQUERADE + per-run DNS; measured
    with `apk add curl` from a snapshot-restored guest).
-2. macOS tier via libkrun (KVM + Hypervisor.framework in one code path —
-   the reason libkrun is the preferred vehicle long-term).
+2. ~~macOS tier via libkrun~~ **engine written** (`hvf-microvm`,
+   EXPERIMENTAL — see the section above): FFI, planning, probe and CLI
+   wiring exist and are type-checked for both Apple targets; what
+   remains is execution on real hardware (first boot, e2e suite, then
+   networking via gvproxy, binds via a custom initramfs, and per-backend
+   benchmarks — no number exists yet).
 3. Snapshot/restore on the microVM tier: Firecracker path validated under
    WSL2 (91 ms median, live guest); CH re-validation on native KVM still
    pending (`bench/snapshot-native`); encrypted at rest.
