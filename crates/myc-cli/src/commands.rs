@@ -5,7 +5,11 @@ use anyhow::{bail, Context, Result};
 use myc_manifest::Manifest;
 use myc_oci::{IngestProgress, Platform};
 use myc_store::Store;
-use std::io::{IsTerminal, Write};
+// IsTerminal only feeds the Linux auto-engine decision (interactive
+// runs); on other platforms the import would be unused.
+#[cfg(target_os = "linux")]
+use std::io::IsTerminal;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 fn open_store(root: &Path) -> Result<Store> {
@@ -262,7 +266,9 @@ pub struct RunArgs {
     /// Linux when READY, native namespaces otherwise, with a clean
     /// fallback for what the microVM cannot carry (pods, --run-dir,
     /// interactive runs, pasta isolation, rootless port publishing — see
-    /// docs/isolation-engines.md). Explicit labels force one engine.
+    /// docs/isolation-engines.md). Explicit labels force one engine;
+    /// `hvf-microvm` (macOS, EXPERIMENTAL) additionally requires
+    /// MYCEL_VM_EXPERIMENTAL=1 — see bench/macos-libkrun/NOTES.md.
     pub engine: Option<String>,
     /// Disable the Firecracker snapshot cache (`--no-snapshot-cache`):
     /// kvm-microvm runs always cold-boot through Cloud Hypervisor.
@@ -408,12 +414,18 @@ pub fn run(root: &Path, reference: &str, args: RunArgs) -> Result<i32> {
         None | Some("auto") | Some("native-namespaces") => {}
         #[cfg(target_os = "linux")]
         Some("kvm-microvm") => return run_kvm_engine(root, reference, args),
+        #[cfg(target_os = "macos")]
+        Some("hvf-microvm") => return run_hvf_engine(root, reference, args),
+        #[cfg(not(target_os = "macos"))]
+        Some("hvf-microvm") => {
+            bail!("hvf-microvm requires macOS (libkrun over Hypervisor.framework)")
+        }
         #[cfg(not(target_os = "linux"))]
         Some("kvm-microvm") => {
             bail!("kvm-microvm requires Linux; on Windows/macOS the twin picks the engine")
         }
         Some(other) => {
-            bail!("unknown engine '{other}' (expected auto, native-namespaces or kvm-microvm)")
+            bail!("unknown engine '{other}' (expected auto, native-namespaces, kvm-microvm or hvf-microvm)")
         }
     }
     let store = open_store(root)?;
@@ -542,6 +554,53 @@ fn run_kvm_engine(root: &Path, reference: &str, args: RunArgs) -> Result<i32> {
     engine
         .run(root, &request)
         .map_err(|e| anyhow::anyhow!("kvm-microvm engine: {e}"))
+}
+
+/// `myc run --engine hvf-microvm` (macOS): the libkrun/Hypervisor.framework
+/// tier — EXPERIMENTAL and unvalidated on Apple hardware. The probe gates
+/// it behind `MYCEL_VM_EXPERIMENTAL=1` and a present libkrun.dylib; the
+/// run refuses binds and published ports with actionable errors (the
+/// tier is network-less in v1 — see `bench/macos-libkrun/NOTES.md`).
+/// Note for callers: on success the process EXITS from inside
+/// `Vm::run` with the workload's exit code (libkrun's
+/// `krun_start_enter` contract) — this function returning is an error
+/// path.
+#[cfg(target_os = "macos")]
+fn run_hvf_engine(root: &Path, reference: &str, args: RunArgs) -> Result<i32> {
+    use myc_backend::ExecBackend;
+
+    if args.join_net.is_some() {
+        bail!("--join-net is not supported by the hvf-microvm engine (pods are namespaces)");
+    }
+    if args.run_dir.is_some() {
+        bail!("--run-dir is not supported by the hvf-microvm engine");
+    }
+    let store = open_store(root)?;
+    let (id, _manifest) = resolve_or_ingest(&store, root, reference)?;
+    let publish: Vec<(u16, u16)> = args
+        .publish
+        .iter()
+        .map(|s| parse_publish(s).map(|p| (p.host, p.container)))
+        .collect::<Result<_>>()?;
+    let request = myc_backend::RunRequest {
+        reference: id,
+        command: args.command,
+        env: args.env,
+        binds: args.binds,
+        hostname: args.hostname,
+        workdir: args.workdir,
+        map_user: args.map_user,
+        // The tier is network-less in v1; `--net none` is the honest
+        // default and any other setting simply has nothing to emulate.
+        isolated_network: args.net == "none",
+        keep_rootfs: args.keep_rootfs,
+        publish,
+        no_snapshot_cache: args.no_snapshot_cache,
+    };
+    let engine = myc_backend::vm::Vm::from_env();
+    engine
+        .run(root, &request)
+        .map_err(|e| anyhow::anyhow!("hvf-microvm engine: {e}"))
 }
 
 pub fn ls(root: &Path, paths: bool) -> Result<i32> {

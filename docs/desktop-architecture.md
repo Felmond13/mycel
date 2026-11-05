@@ -23,7 +23,7 @@ pub trait ExecBackend {
 |---------------|----------|--------|----------|
 | `native-linux`| Linux    | shipped | `myc-run` user namespaces, exactly as always |
 | `wsl2`        | Windows  | shipped | transparent proxy to a Linux twin inside WSL2 |
-| `vm`          | macOS    | scaffold | lightweight Linux VM (Virtualization.framework) — planned |
+| `vm`          | macOS    | implemented (EXPERIMENTAL, unvalidated on hardware) | libkrun microVM over Hypervisor.framework — see `docs/isolation-engines.md` |
 
 `probe()` never panics: a broken setup yields `available: false` plus
 per-check `fix:` lines, which is what `myc doctor` prints.
@@ -70,13 +70,26 @@ Reduced semantics on the native (`--no-proxy`) path are documented in code:
 no symlink materialization, no process groups (stop = `taskkill /T /F`),
 `/proc` metrics empty.
 
-## macOS (planned): lightweight VM — scaffold only
+## macOS: lightweight VM (implemented via libkrun — EXPERIMENTAL)
 
-Nothing here is shipped or tested; `myc` built for macOS returns a clear
-"not yet available" error pointing at this document.
+> Status update (2026-11-05): the macOS tier is now implemented in
+> `crates/myc-backend/src/vm.rs` as the `hvf-microvm` engine —
+> **libkrun over Hypervisor.framework** (chosen over the `vz`-crate plan
+> below because one library also covers KVM on Linux), direct kernel
+> boot with the published guest assets, the materialized rootfs shared
+> over in-process virtiofs, workload through `krun_set_exec`. It is
+> type-checked for both Apple targets but **unvalidated on hardware**
+> and gated behind `MYCEL_VM_EXPERIMENTAL=1`; networking, binds and
+> published ports are future work. Authoritative docs:
+> `docs/isolation-engines.md` (engine section) and
+> `bench/macos-libkrun/NOTES.md` (FFI survey + validation checklist).
+> The original design sketch below is kept for the licensing note and
+> the longer-term twin idea.
 
-Planned host/guest split (same shape as Docker Desktop / OrbStack / colima,
-but radically smaller because the guest only needs `myc`):
+The original plan (superseded by the libkrun engine above, kept as
+context): a "twin"-shaped guest with the Linux `myc` binary inside,
+reached over vsock — same transparent UX as Windows. Store sharing over
+virtiofs and the < 1 s boot target carry over unchanged.
 
 - **Guest image**: a pinned mainline kernel built with a minimal config
   (virtio, ext4, FUSE, user namespaces; ~10–15 MB) plus an initramfs
@@ -92,11 +105,12 @@ but radically smaller because the guest only needs `myc`):
   the single source of truth on the host.
 - **Proxying**: identical UX to Windows — `myc` on macOS forwards commands
   to the twin over a vsock; `probe()` reports VM state with fix hints.
-- **Licensing note**: the Linux kernel is GPLv2. Distributing a pinned
-  kernel image alongside (not linked into) the BSL-1.1-licensed `myc` binary
-  is fine, but the kernel config + sources (or an upstream source offer) must
-  ship with releases, and the kernel must stay a separate artifact rather
-  than bytes embedded into the Mach-O binary.
+- **Licensing note** (still applies to the libkrun engine): the Linux
+  kernel is GPLv2. Distributing a pinned kernel image alongside (not
+  linked into) the BSL-1.1-licensed `myc` binary is fine, but the kernel
+  config + sources (or an upstream source offer) must ship with
+  releases, and the kernel must stay a separate artifact rather than
+  bytes embedded into the Mach-O binary.
 
 ## Cross-target build matrix
 
