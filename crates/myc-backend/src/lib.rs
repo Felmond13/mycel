@@ -11,6 +11,10 @@
 //! strategies: `probe()` reports whether the backend can work here (with an
 //! actionable fix when it cannot), `run()` executes one container.
 
+/// Guest asset auto-provision shared by the microVM engines (download
+/// cache + GitHub Release fetch; used by [`kvm`]).
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) mod assets;
 /// Firecracker snapshot accelerator for the kvm-microvm engine (used by
 /// [`kvm`]; reached through kvm's run path).
 #[cfg(target_os = "linux")]
