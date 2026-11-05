@@ -1116,8 +1116,13 @@ impl FcRun {
             }
             while iptables_run(&iptables_bin(), &del) {}
         }
-        if let Some(lease) = &self.lease {
-            purge_tag_rules(&lease.tag);
+        // The tag purge costs two `iptables -S` spawns; it is only needed
+        // when this run actually pushed rules — a no-port run pushed none,
+        // and its lease was tag-purged at setup time already.
+        if !self.ipt_rules.is_empty() {
+            if let Some(lease) = &self.lease {
+                purge_tag_rules(&lease.tag);
+            }
         }
         td_mark("teardown iptables purge", &mut last_td);
         // 4. Loopback relays.
@@ -1379,7 +1384,15 @@ fn run_vm(g: &mut FcRun, mode: Mode, ctx: &AttemptCtx, tm: &mut PhaseTimer) -> A
         );
     }
 
-    // --- wait for the guest (it reboots itself once the workload exits) --
+    // --- wait for the guest -------------------------------------------------
+    // Exit channel: the guest agent writes the MYCE exit marker + syncs
+    // BEFORE it reboots, so the host can observe the marker while the VM
+    // is still alive (the MYCR sentinel written pre-resume makes a mid-run
+    // poll safe — no stale MYCE can survive it). As soon as the marker is
+    // seen the workload is done and the exit code durable: SIGKILL the
+    // VMM instead of waiting for the guest reboot + FC teardown tail
+    // (measured: that tail was ~40-80 ms idle, ~270 ms under load — see
+    // docs/benchmarks/warm-pool-verdict.md). 5 ms poll granule.
     let interrupted = Arc::new(AtomicBool::new(false));
     {
         let flag = interrupted.clone();
@@ -1392,12 +1405,6 @@ fn run_vm(g: &mut FcRun, mode: Mode, ctx: &AttemptCtx, tm: &mut PhaseTimer) -> A
     let mut timed_out = false;
     let mut killing_since: Option<Instant> = None;
     let mut announced = false;
-    // Exit-channel probes (MYCEL_VM_TRACE): the guest writes the MYCE exit
-    // marker + syncs BEFORE it reboots; the host can observe the marker
-    // while the VM is still alive. Decomposes "wait VM exit" into agent
-    // pickup + exec (resume -> marker) vs guest reboot + FC teardown
-    // (marker -> process exit). The MYCR sentinel written pre-resume makes
-    // a mid-run poll safe (no stale MYCE can survive it).
     let t_loop = Instant::now();
     let mut marker_at: Option<Instant> = None;
     loop {
@@ -1427,19 +1434,24 @@ fn run_vm(g: &mut FcRun, mode: Mode, ctx: &AttemptCtx, tm: &mut PhaseTimer) -> A
                 g.vm.as_mut().unwrap().kill();
             }
         }
-        if ctx.trace
-            && marker_at.is_none()
+        if marker_at.is_none()
+            && !want_shutdown
             && read_exit_marker(&SnapshotFiles::scratch(ctx.snapdir)).is_some()
         {
             marker_at = Some(Instant::now());
-            eprintln!(
-                "[myc-vm] exit marker observed {} ms after resume (host poll granule 20 ms)",
-                t_loop.elapsed().as_millis()
-            );
+            if ctx.trace {
+                eprintln!(
+                    "[myc-vm] exit marker observed {} ms after resume — reaping the VMM now",
+                    t_loop.elapsed().as_millis()
+                );
+            }
+            // Workload done, exit code durable: reap immediately rather
+            // than waiting out the guest reboot + FC exit tail.
+            g.vm.as_mut().unwrap().kill();
         }
         match g.vm.as_mut().unwrap().try_wait() {
             Ok(Some(_)) => break,
-            Ok(None) => thread::sleep(Duration::from_millis(20)),
+            Ok(None) => thread::sleep(Duration::from_millis(5)),
             Err(e) => {
                 let mut err: AttemptErr = BackendError::Io(e).into();
                 err.committed = true;

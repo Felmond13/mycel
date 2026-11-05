@@ -1,0 +1,3 @@
+baseline (attente reboot invité) : n=20 median=  228.5 ms  p95=  257.0 ms  (charge médiane 1.5)
+fix early-exit (marker + kill)   : n=20 median=  201.5 ms  p95=  230.0 ms  (charge médiane 1.5)
+gain médian 27.0 ms (12%), gain p95 27.0 ms
