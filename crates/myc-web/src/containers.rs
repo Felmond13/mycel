@@ -1003,6 +1003,15 @@ const PORT_TAKEN_PATTERNS: &[&str] = &[
 /// Log-tail patterns of the rootless single-uid limitation: the app tried
 /// to switch users or chown files to a uid that does not exist in the
 /// container's user namespace (matched lowercase).
+/// Databases that refuse their very first start until a password env is
+/// provided (mysql/mariadb/postgres official images).
+const DB_PASSWORD_UNSET_PATTERNS: &[&str] = &[
+    // mysql + mariadb entrypoint
+    "database is uninitialized and password option is not specified",
+    // postgres entrypoint
+    "database is uninitialized and superuser password is not specified",
+];
+
 const UID_LIMIT_PATTERNS: &[&str] = &[
     // Any chown failure at startup ("chown: .: Invalid argument",
     // "chown: changing ownership of …: Operation not permitted"…) is in
@@ -1042,6 +1051,17 @@ fn failure_hint_from_log(log_path: &Path, port: Option<u16>) -> Option<String> {
     // ran, and its log is not evidence about user switching. The bare
     // generic patterns ("permission denied" etc.) were removed for the
     // same reason: they matched far too much.
+    if DB_PASSWORD_UNSET_PATTERNS.iter().any(|p| text.contains(p)) {
+        return Some(
+            "This database refuses its first start until it has a password. \
+             Add an environment variable in the start dialog: \
+             MYSQL_ROOT_PASSWORD (MySQL/MariaDB) or POSTGRES_PASSWORD \
+             (PostgreSQL) — or MYSQL_RANDOM_ROOT_PASSWORD=yes to let it \
+             generate one and print it in the logs. The catalog entries on \
+             the Apps page preset this for you."
+                .to_string(),
+        );
+    }
     if !text.contains("myc: error:") && UID_LIMIT_PATTERNS.iter().any(|p| text.contains(p)) {
         return Some(
             "This app tried to switch to its own internal user account, which \
@@ -1135,6 +1155,30 @@ fn remove_run_dir(dir: &Path) {
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn db_password_hint_fires_on_mysql_and_not_on_host_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("c.log");
+
+        std::fs::write(
+            &log,
+            "2026-11-05 [ERROR] [Entrypoint]: Database is uninitialized and password option is not specified.\n",
+        )
+        .unwrap();
+        let hint = failure_hint_from_log(&log, None).unwrap();
+        assert!(hint.contains("MYSQL_ROOT_PASSWORD"), "hint: {hint}");
+
+        // A host-side myc error must not be diagnosed as a uid problem.
+        std::fs::write(&log, "myc: error: i/o error at /x/y: Permission denied\n").unwrap();
+        let hint = failure_hint_from_log(&log, None);
+        assert!(hint.is_none(), "hint: {hint:?}");
+
+        // The real setuid failure still gets its advice.
+        std::fs::write(&log, "su: setgroups: operation not permitted\n").unwrap();
+        let hint = failure_hint_from_log(&log, None).unwrap();
+        assert!(hint.contains("uidmap"), "hint: {hint}");
+    }
 
     /// A fake `myc` binary: ignores every option the manager passes and
     /// executes whatever comes after `--` with `sh -c`. This isolates the

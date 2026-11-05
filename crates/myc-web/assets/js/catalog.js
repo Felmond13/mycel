@@ -18,6 +18,11 @@ export const CATALOG = [
     desc: "The world's favourite SQL database. Password is preset to \u201cmycel\u201d.",
   },
   {
+    id: "mysql", title: "MySQL", tag: "SQL database", icon: "My", port: 3306,
+    image: "mysql:latest", env: ["MYSQL_ROOT_PASSWORD=mycel"],
+    desc: "The classic SQL database. Root password is preset to \u201cmycel\u201d \u2014 the image\u2019s entrypoint creates it on first start.",
+  },
+  {
     id: "mongo", title: "MongoDB", tag: "Document database", icon: "M", port: 27017, map_user: "999",
     image: "mongo:7",
     desc: "A popular database that stores flexible JSON-like documents.",
