@@ -30,11 +30,11 @@ export default {
     },
     async remove(e) {
       const ok = await confirmDialog("Remove " + shortRef(e.name) + " from your library?",
-        "Its files stay on disk until you run cleanup on the Store page. You can get it again any time.", "Remove");
+        "Files not used by any other app are deleted from disk. You can download it again any time.", "Remove");
       if (!ok) return;
       try {
-        await api.del("/api/envs/" + encodeURIComponent(e.id));
-        toast("Removed. Run cleanup on the Store page to reclaim space.");
+        const r = await api.del("/api/envs/" + encodeURIComponent(e.id));
+        toast("Removed" + (r && r.freed_bytes ? " \u2014 " + fmtBytes(r.freed_bytes) + " freed" : "") + ".");
         refreshState(); refreshStats();
       } catch (err) { toast(err.message, true); }
     },

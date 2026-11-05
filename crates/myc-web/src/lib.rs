@@ -337,7 +337,17 @@ async fn remove_env(State(app): State<App>, UrlPath(id): UrlPath<String>) -> Api
         let store = open_store(&app.root)?;
         let (id, _) = resolve(&store, &id)?;
         store.remove_manifest(&id).map_err(internal)?;
-        Ok(Json(json!({ "removed": id })))
+        // Removing the manifest alone keeps every blob on disk until a
+        // separate cleanup pass — to a desktop user that reads as "delete
+        // did nothing" (the store size does not move). Sweep now and
+        // report the freed bytes. Hardlinks held by still-running
+        // containers keep their data alive, so this is safe mid-run.
+        let (deleted, freed) = store.gc().map_err(internal)?;
+        Ok(Json(json!({
+            "removed": id,
+            "freed_files": deleted,
+            "freed_bytes": freed,
+        })))
     })
     .await
 }
