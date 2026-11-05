@@ -132,8 +132,9 @@ docker0-style). Latency e2e `alpine echo` (hyperfine n=10, 2 warmups,
 `bench/microvm/latency-vm.sh`, results archived in `results/latency-vm.*`):
 voie B **351 ms** mean (σ 30), voie A **285 ms** (σ 94, incl. 69 ms mkfs),
 native namespaces **77 ms** — the VM tier costs ~4× today, mostly kernel
-boot + virtiofs handshake; the warm pool (§ below) is the answer for
-latency-critical paths.
+boot + virtiofs handshake; the snapshot accelerator + early exit-at-marker
+(§ below, and `docs/benchmarks/warm-pool-verdict.md`) is the answer for
+latency-critical paths — a warm VM pool was measured and ruled out there.
 
 Known limits (v1): `--map-user` ignored (workloads run as guest root);
 x86_64 guests only (aarch64: binary + guest assets published, engine
@@ -331,14 +332,16 @@ never edited after publication).
 | Linux, native KVM | CH v54 snapshot/restore | kit ready (`bench/snapshot-native`) — **to be executed on native KVM**; the WSL2 run aborted inert, which is a WSL2-KVM artifact, not a verdict on native KVM |
 | Windows (WSL2) | Firecracker v1.17 snapshot/restore | **viable, measured** (`bench/snapshot-wsl2`): boot 389 ms median; snapshot create 614 ms (512 MiB); restore **10/10 alive, 91 ms median, 161 ms p95** (T0 process launch → first byte of `200`, resume included; liveness = console heartbeat + HTTP) |
 | Windows (WSL2) | CH v54 restore | inert (0 interrupts; 3 memory modes) — dead end on WSL2-KVM |
-| Any platform (fallback) | warm pool (`bench/warm-pool`) | **measured**: handoff **28 ms median / 61 ms p95** vs cold boot **299 ms median** (n=30 each, same harness, slim kernel) — ×10.7; works everywhere (processes + taps only, no vCPU save/restore); limits: 1 ready guest per resident VM, refill = background cold boot, N × 512 MiB resident |
+| Any platform (fallback) | warm pool (`bench/warm-pool`) | prototype **measured** (handoff 28 ms median vs cold 299 ms, ×10.7) but **ruled out on the production path** (2026-11-05): with the FC snapshot accelerator shipped, a pre-booted VM eliminates only ~21 ms of the ~225 ms e2e (~9 %) — the rest of its theoretical ceiling is host-side cost recovered by product fixes instead. Full campaign: `docs/benchmarks/warm-pool-verdict.md`; the kit remains the documented fallback for restore-less platforms |
 | macOS (HVF) | libkrun | engine implemented (EXPERIMENTAL); no snapshot API in libkrun → warm pool as stopgap; Hypervisor.framework suspend/resume to be investigated |
 
 Bottom line: the Windows path exists — **Firecracker snapshot/restore
-under WSL2 lands sub-200 ms with a live guest** — and the **warm pool** is
-the everywhere-fallback (already ×10.7 over cold boot on the same
-machine). Raw measurement files live in each bench `results/` directory
-(never edited after publication).
+under WSL2 lands sub-200 ms with a live guest** — and the warm pool
+stays what it always was: the everywhere-**fallback** for platforms
+without vCPU restore, not a product feature on the snapshot path
+(measured, `docs/benchmarks/warm-pool-verdict.md`). Raw measurement
+files live in each bench `results/` directory (never edited after
+publication).
 
 ## Roadmap
 

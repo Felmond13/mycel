@@ -1,5 +1,22 @@
 # Kit pool chaud de microVMs (`bench/warm-pool`)
 
+## Verdict produit (2026-11-05) : PAS intégré — voir `docs/benchmarks/warm-pool-verdict.md`
+
+Le handoff à 28 ms ci-dessous est réel, mais il mesure le RTT d'une
+requête vers un serveur déjà vif, pas un cycle de vie de conteneur. Sur
+le chemin produit (accélérateur snapshot Firecracker livré), un pool
+n'élimine en propre que **~21 ms des ~225 ms** du e2e `myc run`
+(spawn FC + restore) : le ramasse agent + exec + propagation de sortie
+(~120 ms) et le réseau/teardown hôte restent. Décision, campagne complète
+et correctifs livrés à la place (sortie anticipée au marker MYCE) :
+**`docs/benchmarks/warm-pool-verdict.md`**. Ce kit reste le repli
+documenté pour les plateformes sans restore vCPU (macOS HVF, libkrun).
+
+Scripts de la campagne de verdict (ce dossier) : `baseline.sh`
+(référence e2e n=30 + plancher CLI + `--net none`), `decompose.sh`
+(médianes par phase, `MYCEL_VM_TRACE`), `ab-fix.sh` (avant/après
+correctif, alternance stricte) — résultats dans `results/`.
+
 ## Quoi
 
 Le repli snapshot **multiplateforme** : quand le restore n'existe pas ou

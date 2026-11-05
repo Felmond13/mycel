@@ -1,0 +1,17 @@
+décomposition e2e warm (n=20, médiane ms par phase) :
+  gates (asset resolve + fc version)                     : median=   1.5  p95=   2.0
+  net (bridge + lease + tap + arp + iptables + proxies)  : median=  27.0  p95=  32.0
+  fingerprint + snapshot lock                            : median=   0.0  p95=   0.0
+  spawn firecracker + api wait                           : median=  11.0  p95=  37.0
+  load_snapshot (restore)                                : median=  10.0  p95=  46.0
+  inject (scratch write + resume)                        : median=   0.0  p95=   0.0
+  wait VM exit (agent pickup + exec + guest reboot)      : median= 104.0  p95= 166.0
+  teardown vmm reap                                      : median=   1.0  p95=   1.0
+  teardown console tailer                                : median=   4.0  p95=   8.0
+  teardown iptables purge                                : median=   0.0  p95=   0.0
+  teardown tap detach + lease release                    : median=  34.0  p95=  95.0
+  teardown state dir                                     : median=   0.0  p95=   0.0
+  teardown (vmm reap + iptables + tap/lease + state dir) : median=  40.0  p95= 100.0
+  sonde: marker de sortie observé après resume      : median=  73.0  p95= 114.0  (n=20)
+  sonde: mort du process VM après le marker         : median=  27.0  p95=  62.0  (n=20)
+  somme des médianes                                : 232 ms

@@ -1,0 +1,14 @@
+Décomposition (MYCEL_VM_TRACE, binaire corrigé) — fenêtre chargée ~5, n=20.
+NOTE D'HONNÊTETÉ : le fichier de traces brut de cette série a été écrasé
+par la campagne idle suivante avant archivage (erreur de manipulation du
+script, pas de la mesure). Chiffres relevés à l'exécution et cités dans
+docs/benchmarks/warm-pool-verdict.md §4 :
+
+  gates ~2 ; net 43 ; fingerprint 0 ; spawn+API 11 ; restore 12,5 ;
+  inject 0 ; attente sortie VM 180,5 (marker 139 + reap 44) ;
+  teardown 54 (reap 1, tailer 5,5, iptables 0, tap+bail 49) ;
+  somme des médianes 358 ms.
+
+Les séries brute complètes archivées : decompose-idle-{baseline,fixed}.txt
+(charge ~1, n=20 chacune) et results/baseline/decompose-traces.txt dans le
+commit précédent (charge 8-14, binaire avant-correctif, n=20).

@@ -1855,6 +1855,7 @@ impl ExecBackend for KvmMicroVm {
         // docs/benchmarks/snapshot-accelerator.md). Any missing piece falls
         // back to the Cloud Hypervisor path below with one log line.
         if !request.no_snapshot_cache {
+            step("pre-snapshot (assets + store resolve)", &mut mark);
             match crate::firecracker::snapshot_run(
                 self, store_root, request, &id, &manifest, &command,
             )? {

@@ -1,0 +1,440 @@
+[myc-vm] pre-snapshot (assets + store resolve): 0 ms
+[myc-vm] phase gates (asset resolve + fc version): 1 ms (total 1 ms)
+[myc-vm] phase net (bridge + lease + tap + arp + iptables + proxies): 28 ms (total 29 ms)
+[myc-vm] snapshot cache: /home/nboukadoum-ext/wt-pool/bench/warm-pool/.snapcache-base/abc60b88f8640190a7ff07b874c258bbb47863c4e2c3f379c6e16fa4cd63b95a
+[myc-vm] phase fingerprint + snapshot lock: 0 ms (total 30 ms)
+[myc-vm] phase spawn firecracker + api wait: 11 ms (total 41 ms)
+[myc-vm] phase load_snapshot (restore): 10 ms (total 52 ms)
+[myc-vm] phase inject (scratch write + resume): 0 ms (total 52 ms)
+[myc-vm] restored from snapshot in 22 ms
+[myc-vm] restore path: spawn->resumed 22 ms
+[myc-vm] exit marker observed 114 ms after resume — reaping the VMM now
+[myc-vm] VM process exited 27 ms after the exit marker (guest reboot + FC exit)
+[myc-vm] phase wait VM exit (agent pickup + exec + guest reboot): 142 ms (total 194 ms)
+[myc-vm] snapshot path total: 164 ms
+[myc-vm] phase teardown vmm reap: 0 ms
+[myc-vm] phase teardown console tailer: 8 ms
+[myc-vm] phase teardown iptables purge: 0 ms
+[myc-vm] phase teardown tap detach + lease release: 58 ms
+[myc-vm] phase teardown state dir: 0 ms
+[myc-vm] teardown total: 68 ms
+[myc-vm] phase teardown (vmm reap + iptables + tap/lease + state dir): 68 ms (total 263 ms)
+[myc-vm] snapshot_run total (entry to release done): 263 ms
+[myc-vm] pre-snapshot (assets + store resolve): 0 ms
+[myc-vm] phase gates (asset resolve + fc version): 2 ms (total 2 ms)
+[myc-vm] phase net (bridge + lease + tap + arp + iptables + proxies): 26 ms (total 29 ms)
+[myc-vm] snapshot cache: /home/nboukadoum-ext/wt-pool/bench/warm-pool/.snapcache-base/abc60b88f8640190a7ff07b874c258bbb47863c4e2c3f379c6e16fa4cd63b95a
+[myc-vm] phase fingerprint + snapshot lock: 0 ms (total 29 ms)
+[myc-vm] phase spawn firecracker + api wait: 11 ms (total 40 ms)
+[myc-vm] phase load_snapshot (restore): 8 ms (total 49 ms)
+[myc-vm] phase inject (scratch write + resume): 0 ms (total 50 ms)
+[myc-vm] restored from snapshot in 20 ms
+[myc-vm] restore path: spawn->resumed 20 ms
+[myc-vm] exit marker observed 62 ms after resume — reaping the VMM now
+[myc-vm] VM process exited 27 ms after the exit marker (guest reboot + FC exit)
+[myc-vm] phase wait VM exit (agent pickup + exec + guest reboot): 90 ms (total 140 ms)
+[myc-vm] snapshot path total: 111 ms
+[myc-vm] phase teardown vmm reap: 0 ms
+[myc-vm] phase teardown console tailer: 1 ms
+[myc-vm] phase teardown iptables purge: 0 ms
+[myc-vm] phase teardown tap detach + lease release: 41 ms
+[myc-vm] phase teardown state dir: 0 ms
+[myc-vm] teardown total: 44 ms
+[myc-vm] phase teardown (vmm reap + iptables + tap/lease + state dir): 44 ms (total 185 ms)
+[myc-vm] snapshot_run total (entry to release done): 185 ms
+[myc-vm] pre-snapshot (assets + store resolve): 0 ms
+[myc-vm] phase gates (asset resolve + fc version): 2 ms (total 2 ms)
+[myc-vm] phase net (bridge + lease + tap + arp + iptables + proxies): 26 ms (total 29 ms)
+[myc-vm] snapshot cache: /home/nboukadoum-ext/wt-pool/bench/warm-pool/.snapcache-base/abc60b88f8640190a7ff07b874c258bbb47863c4e2c3f379c6e16fa4cd63b95a
+[myc-vm] phase fingerprint + snapshot lock: 0 ms (total 29 ms)
+[myc-vm] phase spawn firecracker + api wait: 10 ms (total 40 ms)
+[myc-vm] phase load_snapshot (restore): 12 ms (total 53 ms)
+[myc-vm] phase inject (scratch write + resume): 0 ms (total 53 ms)
+[myc-vm] restored from snapshot in 24 ms
+[myc-vm] restore path: spawn->resumed 24 ms
+[myc-vm] exit marker observed 78 ms after resume — reaping the VMM now
+[myc-vm] VM process exited 23 ms after the exit marker (guest reboot + FC exit)
+[myc-vm] phase wait VM exit (agent pickup + exec + guest reboot): 102 ms (total 156 ms)
+[myc-vm] snapshot path total: 126 ms
+[myc-vm] phase teardown vmm reap: 1 ms
+[myc-vm] phase teardown console tailer: 5 ms
+[myc-vm] phase teardown iptables purge: 0 ms
+[myc-vm] phase teardown tap detach + lease release: 36 ms
+[myc-vm] phase teardown state dir: 0 ms
+[myc-vm] teardown total: 44 ms
+[myc-vm] phase teardown (vmm reap + iptables + tap/lease + state dir): 44 ms (total 200 ms)
+[myc-vm] snapshot_run total (entry to release done): 200 ms
+[myc-vm] pre-snapshot (assets + store resolve): 0 ms
+[myc-vm] phase gates (asset resolve + fc version): 2 ms (total 2 ms)
+[myc-vm] phase net (bridge + lease + tap + arp + iptables + proxies): 32 ms (total 34 ms)
+[myc-vm] snapshot cache: /home/nboukadoum-ext/wt-pool/bench/warm-pool/.snapcache-base/abc60b88f8640190a7ff07b874c258bbb47863c4e2c3f379c6e16fa4cd63b95a
+[myc-vm] phase fingerprint + snapshot lock: 0 ms (total 35 ms)
+[myc-vm] phase spawn firecracker + api wait: 11 ms (total 46 ms)
+[myc-vm] phase load_snapshot (restore): 14 ms (total 60 ms)
+[myc-vm] phase inject (scratch write + resume): 0 ms (total 60 ms)
+[myc-vm] restored from snapshot in 25 ms
+[myc-vm] restore path: spawn->resumed 25 ms
+[myc-vm] exit marker observed 67 ms after resume — reaping the VMM now
+[myc-vm] VM process exited 35 ms after the exit marker (guest reboot + FC exit)
+[myc-vm] phase wait VM exit (agent pickup + exec + guest reboot): 102 ms (total 163 ms)
+[myc-vm] snapshot path total: 128 ms
+[myc-vm] phase teardown vmm reap: 1 ms
+[myc-vm] phase teardown console tailer: 4 ms
+[myc-vm] phase teardown iptables purge: 0 ms
+[myc-vm] phase teardown tap detach + lease release: 27 ms
+[myc-vm] phase teardown state dir: 0 ms
+[myc-vm] teardown total: 32 ms
+[myc-vm] phase teardown (vmm reap + iptables + tap/lease + state dir): 32 ms (total 196 ms)
+[myc-vm] snapshot_run total (entry to release done): 196 ms
+[myc-vm] pre-snapshot (assets + store resolve): 0 ms
+[myc-vm] phase gates (asset resolve + fc version): 2 ms (total 2 ms)
+[myc-vm] phase net (bridge + lease + tap + arp + iptables + proxies): 25 ms (total 27 ms)
+[myc-vm] snapshot cache: /home/nboukadoum-ext/wt-pool/bench/warm-pool/.snapcache-base/abc60b88f8640190a7ff07b874c258bbb47863c4e2c3f379c6e16fa4cd63b95a
+[myc-vm] phase fingerprint + snapshot lock: 0 ms (total 27 ms)
+[myc-vm] phase spawn firecracker + api wait: 11 ms (total 39 ms)
+[myc-vm] phase load_snapshot (restore): 10 ms (total 49 ms)
+[myc-vm] phase inject (scratch write + resume): 0 ms (total 50 ms)
+[myc-vm] restored from snapshot in 22 ms
+[myc-vm] restore path: spawn->resumed 22 ms
+[myc-vm] exit marker observed 73 ms after resume — reaping the VMM now
+[myc-vm] VM process exited 33 ms after the exit marker (guest reboot + FC exit)
+[myc-vm] phase wait VM exit (agent pickup + exec + guest reboot): 106 ms (total 156 ms)
+[myc-vm] snapshot path total: 128 ms
+[myc-vm] phase teardown vmm reap: 1 ms
+[myc-vm] phase teardown console tailer: 3 ms
+[myc-vm] phase teardown iptables purge: 0 ms
+[myc-vm] phase teardown tap detach + lease release: 34 ms
+[myc-vm] phase teardown state dir: 0 ms
+[myc-vm] teardown total: 40 ms
+[myc-vm] phase teardown (vmm reap + iptables + tap/lease + state dir): 40 ms (total 196 ms)
+[myc-vm] snapshot_run total (entry to release done): 196 ms
+[myc-vm] pre-snapshot (assets + store resolve): 0 ms
+[myc-vm] phase gates (asset resolve + fc version): 2 ms (total 2 ms)
+[myc-vm] phase net (bridge + lease + tap + arp + iptables + proxies): 27 ms (total 29 ms)
+[myc-vm] snapshot cache: /home/nboukadoum-ext/wt-pool/bench/warm-pool/.snapcache-base/abc60b88f8640190a7ff07b874c258bbb47863c4e2c3f379c6e16fa4cd63b95a
+[myc-vm] phase fingerprint + snapshot lock: 0 ms (total 29 ms)
+[myc-vm] phase spawn firecracker + api wait: 11 ms (total 40 ms)
+[myc-vm] phase load_snapshot (restore): 9 ms (total 50 ms)
+[myc-vm] phase inject (scratch write + resume): 0 ms (total 51 ms)
+[myc-vm] restored from snapshot in 21 ms
+[myc-vm] restore path: spawn->resumed 21 ms
+[myc-vm] exit marker observed 78 ms after resume — reaping the VMM now
+[myc-vm] VM process exited 28 ms after the exit marker (guest reboot + FC exit)
+[myc-vm] phase wait VM exit (agent pickup + exec + guest reboot): 106 ms (total 157 ms)
+[myc-vm] snapshot path total: 128 ms
+[myc-vm] phase teardown vmm reap: 1 ms
+[myc-vm] phase teardown console tailer: 4 ms
+[myc-vm] phase teardown iptables purge: 0 ms
+[myc-vm] phase teardown tap detach + lease release: 34 ms
+[myc-vm] phase teardown state dir: 0 ms
+[myc-vm] teardown total: 40 ms
+[myc-vm] phase teardown (vmm reap + iptables + tap/lease + state dir): 40 ms (total 198 ms)
+[myc-vm] snapshot_run total (entry to release done): 198 ms
+[myc-vm] pre-snapshot (assets + store resolve): 0 ms
+[myc-vm] phase gates (asset resolve + fc version): 1 ms (total 1 ms)
+[myc-vm] phase net (bridge + lease + tap + arp + iptables + proxies): 27 ms (total 29 ms)
+[myc-vm] snapshot cache: /home/nboukadoum-ext/wt-pool/bench/warm-pool/.snapcache-base/abc60b88f8640190a7ff07b874c258bbb47863c4e2c3f379c6e16fa4cd63b95a
+[myc-vm] phase fingerprint + snapshot lock: 0 ms (total 29 ms)
+[myc-vm] phase spawn firecracker + api wait: 11 ms (total 41 ms)
+[myc-vm] phase load_snapshot (restore): 7 ms (total 48 ms)
+[myc-vm] phase inject (scratch write + resume): 0 ms (total 49 ms)
+[myc-vm] restored from snapshot in 19 ms
+[myc-vm] restore path: spawn->resumed 19 ms
+[myc-vm] exit marker observed 67 ms after resume — reaping the VMM now
+[myc-vm] VM process exited 26 ms after the exit marker (guest reboot + FC exit)
+[myc-vm] phase wait VM exit (agent pickup + exec + guest reboot): 94 ms (total 143 ms)
+[myc-vm] snapshot path total: 113 ms
+[myc-vm] phase teardown vmm reap: 0 ms
+[myc-vm] phase teardown console tailer: 0 ms
+[myc-vm] phase teardown iptables purge: 0 ms
+[myc-vm] phase teardown tap detach + lease release: 34 ms
+[myc-vm] phase teardown state dir: 0 ms
+[myc-vm] teardown total: 36 ms
+[myc-vm] phase teardown (vmm reap + iptables + tap/lease + state dir): 36 ms (total 180 ms)
+[myc-vm] snapshot_run total (entry to release done): 180 ms
+[myc-vm] pre-snapshot (assets + store resolve): 0 ms
+[myc-vm] phase gates (asset resolve + fc version): 2 ms (total 2 ms)
+[myc-vm] phase net (bridge + lease + tap + arp + iptables + proxies): 25 ms (total 27 ms)
+[myc-vm] snapshot cache: /home/nboukadoum-ext/wt-pool/bench/warm-pool/.snapcache-base/abc60b88f8640190a7ff07b874c258bbb47863c4e2c3f379c6e16fa4cd63b95a
+[myc-vm] phase fingerprint + snapshot lock: 0 ms (total 27 ms)
+[myc-vm] phase spawn firecracker + api wait: 10 ms (total 38 ms)
+[myc-vm] phase load_snapshot (restore): 12 ms (total 51 ms)
+[myc-vm] phase inject (scratch write + resume): 0 ms (total 51 ms)
+[myc-vm] restored from snapshot in 23 ms
+[myc-vm] restore path: spawn->resumed 23 ms
+[myc-vm] exit marker observed 57 ms after resume — reaping the VMM now
+[myc-vm] VM process exited 24 ms after the exit marker (guest reboot + FC exit)
+[myc-vm] phase wait VM exit (agent pickup + exec + guest reboot): 81 ms (total 133 ms)
+[myc-vm] snapshot path total: 105 ms
+[myc-vm] phase teardown vmm reap: 1 ms
+[myc-vm] phase teardown console tailer: 6 ms
+[myc-vm] phase teardown iptables purge: 0 ms
+[myc-vm] phase teardown tap detach + lease release: 24 ms
+[myc-vm] phase teardown state dir: 0 ms
+[myc-vm] teardown total: 32 ms
+[myc-vm] phase teardown (vmm reap + iptables + tap/lease + state dir): 32 ms (total 165 ms)
+[myc-vm] snapshot_run total (entry to release done): 165 ms
+[myc-vm] pre-snapshot (assets + store resolve): 0 ms
+[myc-vm] phase gates (asset resolve + fc version): 2 ms (total 2 ms)
+[myc-vm] phase net (bridge + lease + tap + arp + iptables + proxies): 37 ms (total 40 ms)
+[myc-vm] snapshot cache: /home/nboukadoum-ext/wt-pool/bench/warm-pool/.snapcache-base/abc60b88f8640190a7ff07b874c258bbb47863c4e2c3f379c6e16fa4cd63b95a
+[myc-vm] phase fingerprint + snapshot lock: 0 ms (total 40 ms)
+[myc-vm] phase spawn firecracker + api wait: 10 ms (total 51 ms)
+[myc-vm] phase load_snapshot (restore): 14 ms (total 65 ms)
+[myc-vm] phase inject (scratch write + resume): 0 ms (total 66 ms)
+[myc-vm] restored from snapshot in 25 ms
+[myc-vm] restore path: spawn->resumed 25 ms
+[myc-vm] exit marker observed 103 ms after resume — reaping the VMM now
+[myc-vm] VM process exited 62 ms after the exit marker (guest reboot + FC exit)
+[myc-vm] phase wait VM exit (agent pickup + exec + guest reboot): 166 ms (total 232 ms)
+[myc-vm] snapshot path total: 191 ms
+[myc-vm] phase teardown vmm reap: 0 ms
+[myc-vm] phase teardown console tailer: 1 ms
+[myc-vm] phase teardown iptables purge: 0 ms
+[myc-vm] phase teardown tap detach + lease release: 29 ms
+[myc-vm] phase teardown state dir: 0 ms
+[myc-vm] teardown total: 32 ms
+[myc-vm] phase teardown (vmm reap + iptables + tap/lease + state dir): 32 ms (total 264 ms)
+[myc-vm] snapshot_run total (entry to release done): 264 ms
+[myc-vm] pre-snapshot (assets + store resolve): 0 ms
+[myc-vm] phase gates (asset resolve + fc version): 1 ms (total 1 ms)
+[myc-vm] phase net (bridge + lease + tap + arp + iptables + proxies): 28 ms (total 29 ms)
+[myc-vm] snapshot cache: /home/nboukadoum-ext/wt-pool/bench/warm-pool/.snapcache-base/abc60b88f8640190a7ff07b874c258bbb47863c4e2c3f379c6e16fa4cd63b95a
+[myc-vm] phase fingerprint + snapshot lock: 0 ms (total 30 ms)
+[myc-vm] phase spawn firecracker + api wait: 11 ms (total 41 ms)
+[myc-vm] phase load_snapshot (restore): 12 ms (total 53 ms)
+[myc-vm] phase inject (scratch write + resume): 0 ms (total 54 ms)
+[myc-vm] restored from snapshot in 23 ms
+[myc-vm] restore path: spawn->resumed 23 ms
+[myc-vm] exit marker observed 78 ms after resume — reaping the VMM now
+[myc-vm] VM process exited 24 ms after the exit marker (guest reboot + FC exit)
+[myc-vm] phase wait VM exit (agent pickup + exec + guest reboot): 102 ms (total 156 ms)
+[myc-vm] snapshot path total: 126 ms
+[myc-vm] phase teardown vmm reap: 1 ms
+[myc-vm] phase teardown console tailer: 8 ms
+[myc-vm] phase teardown iptables purge: 0 ms
+[myc-vm] phase teardown tap detach + lease release: 30 ms
+[myc-vm] phase teardown state dir: 0 ms
+[myc-vm] teardown total: 40 ms
+[myc-vm] phase teardown (vmm reap + iptables + tap/lease + state dir): 40 ms (total 196 ms)
+[myc-vm] snapshot_run total (entry to release done): 196 ms
+[myc-vm] pre-snapshot (assets + store resolve): 0 ms
+[myc-vm] phase gates (asset resolve + fc version): 1 ms (total 1 ms)
+[myc-vm] phase net (bridge + lease + tap + arp + iptables + proxies): 26 ms (total 28 ms)
+[myc-vm] snapshot cache: /home/nboukadoum-ext/wt-pool/bench/warm-pool/.snapcache-base/abc60b88f8640190a7ff07b874c258bbb47863c4e2c3f379c6e16fa4cd63b95a
+[myc-vm] phase fingerprint + snapshot lock: 0 ms (total 28 ms)
+[myc-vm] phase spawn firecracker + api wait: 11 ms (total 39 ms)
+[myc-vm] phase load_snapshot (restore): 7 ms (total 46 ms)
+[myc-vm] phase inject (scratch write + resume): 0 ms (total 47 ms)
+[myc-vm] restored from snapshot in 19 ms
+[myc-vm] restore path: spawn->resumed 19 ms
+[myc-vm] exit marker observed 67 ms after resume — reaping the VMM now
+[myc-vm] VM process exited 54 ms after the exit marker (guest reboot + FC exit)
+[myc-vm] phase wait VM exit (agent pickup + exec + guest reboot): 122 ms (total 169 ms)
+[myc-vm] snapshot path total: 141 ms
+[myc-vm] phase teardown vmm reap: 0 ms
+[myc-vm] phase teardown console tailer: 1 ms
+[myc-vm] phase teardown iptables purge: 0 ms
+[myc-vm] phase teardown tap detach + lease release: 33 ms
+[myc-vm] phase teardown state dir: 0 ms
+[myc-vm] teardown total: 36 ms
+[myc-vm] phase teardown (vmm reap + iptables + tap/lease + state dir): 36 ms (total 206 ms)
+[myc-vm] snapshot_run total (entry to release done): 206 ms
+[myc-vm] pre-snapshot (assets + store resolve): 0 ms
+[myc-vm] phase gates (asset resolve + fc version): 1 ms (total 1 ms)
+[myc-vm] phase net (bridge + lease + tap + arp + iptables + proxies): 30 ms (total 32 ms)
+[myc-vm] snapshot cache: /home/nboukadoum-ext/wt-pool/bench/warm-pool/.snapcache-base/abc60b88f8640190a7ff07b874c258bbb47863c4e2c3f379c6e16fa4cd63b95a
+[myc-vm] phase fingerprint + snapshot lock: 0 ms (total 32 ms)
+[myc-vm] phase spawn firecracker + api wait: 11 ms (total 43 ms)
+[myc-vm] phase load_snapshot (restore): 7 ms (total 51 ms)
+[myc-vm] phase inject (scratch write + resume): 0 ms (total 51 ms)
+[myc-vm] restored from snapshot in 19 ms
+[myc-vm] restore path: spawn->resumed 19 ms
+[myc-vm] exit marker observed 73 ms after resume — reaping the VMM now
+[myc-vm] VM process exited 36 ms after the exit marker (guest reboot + FC exit)
+[myc-vm] phase wait VM exit (agent pickup + exec + guest reboot): 110 ms (total 162 ms)
+[myc-vm] snapshot path total: 129 ms
+[myc-vm] phase teardown vmm reap: 1 ms
+[myc-vm] phase teardown console tailer: 3 ms
+[myc-vm] phase teardown iptables purge: 0 ms
+[myc-vm] phase teardown tap detach + lease release: 51 ms
+[myc-vm] phase teardown state dir: 0 ms
+[myc-vm] teardown total: 55 ms
+[myc-vm] phase teardown (vmm reap + iptables + tap/lease + state dir): 55 ms (total 218 ms)
+[myc-vm] snapshot_run total (entry to release done): 218 ms
+[myc-vm] pre-snapshot (assets + store resolve): 0 ms
+[myc-vm] phase gates (asset resolve + fc version): 2 ms (total 2 ms)
+[myc-vm] phase net (bridge + lease + tap + arp + iptables + proxies): 27 ms (total 30 ms)
+[myc-vm] snapshot cache: /home/nboukadoum-ext/wt-pool/bench/warm-pool/.snapcache-base/abc60b88f8640190a7ff07b874c258bbb47863c4e2c3f379c6e16fa4cd63b95a
+[myc-vm] phase fingerprint + snapshot lock: 0 ms (total 30 ms)
+[myc-vm] phase spawn firecracker + api wait: 10 ms (total 41 ms)
+[myc-vm] phase load_snapshot (restore): 13 ms (total 54 ms)
+[myc-vm] phase inject (scratch write + resume): 0 ms (total 55 ms)
+[myc-vm] restored from snapshot in 24 ms
+[myc-vm] restore path: spawn->resumed 24 ms
+[myc-vm] exit marker observed 82 ms after resume — reaping the VMM now
+[myc-vm] VM process exited 27 ms after the exit marker (guest reboot + FC exit)
+[myc-vm] phase wait VM exit (agent pickup + exec + guest reboot): 110 ms (total 165 ms)
+[myc-vm] snapshot path total: 135 ms
+[myc-vm] phase teardown vmm reap: 1 ms
+[myc-vm] phase teardown console tailer: 7 ms
+[myc-vm] phase teardown iptables purge: 0 ms
+[myc-vm] phase teardown tap detach + lease release: 31 ms
+[myc-vm] phase teardown state dir: 0 ms
+[myc-vm] teardown total: 40 ms
+[myc-vm] phase teardown (vmm reap + iptables + tap/lease + state dir): 40 ms (total 206 ms)
+[myc-vm] snapshot_run total (entry to release done): 206 ms
+[myc-vm] pre-snapshot (assets + store resolve): 0 ms
+[myc-vm] phase gates (asset resolve + fc version): 3 ms (total 3 ms)
+[myc-vm] phase net (bridge + lease + tap + arp + iptables + proxies): 26 ms (total 29 ms)
+[myc-vm] snapshot cache: /home/nboukadoum-ext/wt-pool/bench/warm-pool/.snapcache-base/abc60b88f8640190a7ff07b874c258bbb47863c4e2c3f379c6e16fa4cd63b95a
+[myc-vm] phase fingerprint + snapshot lock: 0 ms (total 30 ms)
+[myc-vm] phase spawn firecracker + api wait: 10 ms (total 41 ms)
+[myc-vm] phase load_snapshot (restore): 9 ms (total 50 ms)
+[myc-vm] phase inject (scratch write + resume): 0 ms (total 51 ms)
+[myc-vm] restored from snapshot in 21 ms
+[myc-vm] restore path: spawn->resumed 21 ms
+[myc-vm] exit marker observed 58 ms after resume — reaping the VMM now
+[myc-vm] VM process exited 20 ms after the exit marker (guest reboot + FC exit)
+[myc-vm] phase wait VM exit (agent pickup + exec + guest reboot): 78 ms (total 130 ms)
+[myc-vm] snapshot path total: 100 ms
+[myc-vm] phase teardown vmm reap: 0 ms
+[myc-vm] phase teardown console tailer: 1 ms
+[myc-vm] phase teardown iptables purge: 0 ms
+[myc-vm] phase teardown tap detach + lease release: 33 ms
+[myc-vm] phase teardown state dir: 0 ms
+[myc-vm] teardown total: 36 ms
+[myc-vm] phase teardown (vmm reap + iptables + tap/lease + state dir): 36 ms (total 166 ms)
+[myc-vm] snapshot_run total (entry to release done): 166 ms
+[myc-vm] pre-snapshot (assets + store resolve): 0 ms
+[myc-vm] phase gates (asset resolve + fc version): 1 ms (total 1 ms)
+[myc-vm] phase net (bridge + lease + tap + arp + iptables + proxies): 26 ms (total 28 ms)
+[myc-vm] snapshot cache: /home/nboukadoum-ext/wt-pool/bench/warm-pool/.snapcache-base/abc60b88f8640190a7ff07b874c258bbb47863c4e2c3f379c6e16fa4cd63b95a
+[myc-vm] phase fingerprint + snapshot lock: 0 ms (total 28 ms)
+[myc-vm] phase spawn firecracker + api wait: 11 ms (total 40 ms)
+[myc-vm] phase load_snapshot (restore): 9 ms (total 49 ms)
+[myc-vm] phase inject (scratch write + resume): 0 ms (total 50 ms)
+[myc-vm] restored from snapshot in 21 ms
+[myc-vm] restore path: spawn->resumed 21 ms
+[myc-vm] exit marker observed 68 ms after resume — reaping the VMM now
+[myc-vm] VM process exited 26 ms after the exit marker (guest reboot + FC exit)
+[myc-vm] phase wait VM exit (agent pickup + exec + guest reboot): 94 ms (total 144 ms)
+[myc-vm] snapshot path total: 116 ms
+[myc-vm] phase teardown vmm reap: 1 ms
+[myc-vm] phase teardown console tailer: 6 ms
+[myc-vm] phase teardown iptables purge: 0 ms
+[myc-vm] phase teardown tap detach + lease release: 40 ms
+[myc-vm] phase teardown state dir: 0 ms
+[myc-vm] teardown total: 47 ms
+[myc-vm] phase teardown (vmm reap + iptables + tap/lease + state dir): 48 ms (total 193 ms)
+[myc-vm] snapshot_run total (entry to release done): 193 ms
+[myc-vm] pre-snapshot (assets + store resolve): 0 ms
+[myc-vm] phase gates (asset resolve + fc version): 1 ms (total 1 ms)
+[myc-vm] phase net (bridge + lease + tap + arp + iptables + proxies): 31 ms (total 32 ms)
+[myc-vm] snapshot cache: /home/nboukadoum-ext/wt-pool/bench/warm-pool/.snapcache-base/abc60b88f8640190a7ff07b874c258bbb47863c4e2c3f379c6e16fa4cd63b95a
+[myc-vm] phase fingerprint + snapshot lock: 0 ms (total 33 ms)
+[myc-vm] phase spawn firecracker + api wait: 11 ms (total 44 ms)
+[myc-vm] phase load_snapshot (restore): 9 ms (total 54 ms)
+[myc-vm] phase inject (scratch write + resume): 0 ms (total 55 ms)
+[myc-vm] restored from snapshot in 21 ms
+[myc-vm] restore path: spawn->resumed 21 ms
+[myc-vm] exit marker observed 78 ms after resume — reaping the VMM now
+[myc-vm] VM process exited 35 ms after the exit marker (guest reboot + FC exit)
+[myc-vm] phase wait VM exit (agent pickup + exec + guest reboot): 114 ms (total 169 ms)
+[myc-vm] snapshot path total: 135 ms
+[myc-vm] phase teardown vmm reap: 2 ms
+[myc-vm] phase teardown console tailer: 7 ms
+[myc-vm] phase teardown iptables purge: 0 ms
+[myc-vm] phase teardown tap detach + lease release: 34 ms
+[myc-vm] phase teardown state dir: 0 ms
+[myc-vm] teardown total: 44 ms
+[myc-vm] phase teardown (vmm reap + iptables + tap/lease + state dir): 44 ms (total 213 ms)
+[myc-vm] snapshot_run total (entry to release done): 213 ms
+[myc-vm] pre-snapshot (assets + store resolve): 0 ms
+[myc-vm] phase gates (asset resolve + fc version): 1 ms (total 1 ms)
+[myc-vm] phase net (bridge + lease + tap + arp + iptables + proxies): 27 ms (total 28 ms)
+[myc-vm] snapshot cache: /home/nboukadoum-ext/wt-pool/bench/warm-pool/.snapcache-base/abc60b88f8640190a7ff07b874c258bbb47863c4e2c3f379c6e16fa4cd63b95a
+[myc-vm] phase fingerprint + snapshot lock: 0 ms (total 29 ms)
+[myc-vm] phase spawn firecracker + api wait: 11 ms (total 40 ms)
+[myc-vm] phase load_snapshot (restore): 10 ms (total 51 ms)
+[myc-vm] phase inject (scratch write + resume): 0 ms (total 51 ms)
+[myc-vm] restored from snapshot in 22 ms
+[myc-vm] restore path: spawn->resumed 22 ms
+[myc-vm] exit marker observed 73 ms after resume — reaping the VMM now
+[myc-vm] VM process exited 21 ms after the exit marker (guest reboot + FC exit)
+[myc-vm] phase wait VM exit (agent pickup + exec + guest reboot): 94 ms (total 146 ms)
+[myc-vm] snapshot path total: 117 ms
+[myc-vm] phase teardown vmm reap: 0 ms
+[myc-vm] phase teardown console tailer: 6 ms
+[myc-vm] phase teardown iptables purge: 0 ms
+[myc-vm] phase teardown tap detach + lease release: 44 ms
+[myc-vm] phase teardown state dir: 0 ms
+[myc-vm] teardown total: 52 ms
+[myc-vm] phase teardown (vmm reap + iptables + tap/lease + state dir): 52 ms (total 198 ms)
+[myc-vm] snapshot_run total (entry to release done): 198 ms
+[myc-vm] pre-snapshot (assets + store resolve): 0 ms
+[myc-vm] phase gates (asset resolve + fc version): 1 ms (total 1 ms)
+[myc-vm] phase net (bridge + lease + tap + arp + iptables + proxies): 27 ms (total 29 ms)
+[myc-vm] snapshot cache: /home/nboukadoum-ext/wt-pool/bench/warm-pool/.snapcache-base/abc60b88f8640190a7ff07b874c258bbb47863c4e2c3f379c6e16fa4cd63b95a
+[myc-vm] phase fingerprint + snapshot lock: 0 ms (total 29 ms)
+[myc-vm] phase spawn firecracker + api wait: 37 ms (total 67 ms)
+[myc-vm] phase load_snapshot (restore): 46 ms (total 113 ms)
+[myc-vm] phase inject (scratch write + resume): 0 ms (total 114 ms)
+[myc-vm] restored from snapshot in 84 ms
+[myc-vm] restore path: spawn->resumed 84 ms
+[myc-vm] exit marker observed 283 ms after resume — reaping the VMM now
+[myc-vm] VM process exited 91 ms after the exit marker (guest reboot + FC exit)
+[myc-vm] phase wait VM exit (agent pickup + exec + guest reboot): 374 ms (total 488 ms)
+[myc-vm] snapshot path total: 459 ms
+[myc-vm] phase teardown vmm reap: 1 ms
+[myc-vm] phase teardown console tailer: 7 ms
+[myc-vm] phase teardown iptables purge: 0 ms
+[myc-vm] phase teardown tap detach + lease release: 118 ms
+[myc-vm] phase teardown state dir: 0 ms
+[myc-vm] teardown total: 128 ms
+[myc-vm] phase teardown (vmm reap + iptables + tap/lease + state dir): 128 ms (total 617 ms)
+[myc-vm] snapshot_run total (entry to release done): 617 ms
+[myc-vm] pre-snapshot (assets + store resolve): 0 ms
+[myc-vm] phase gates (asset resolve + fc version): 2 ms (total 2 ms)
+[myc-vm] phase net (bridge + lease + tap + arp + iptables + proxies): 27 ms (total 29 ms)
+[myc-vm] snapshot cache: /home/nboukadoum-ext/wt-pool/bench/warm-pool/.snapcache-base/abc60b88f8640190a7ff07b874c258bbb47863c4e2c3f379c6e16fa4cd63b95a
+[myc-vm] phase fingerprint + snapshot lock: 0 ms (total 29 ms)
+[myc-vm] phase spawn firecracker + api wait: 11 ms (total 40 ms)
+[myc-vm] phase load_snapshot (restore): 14 ms (total 54 ms)
+[myc-vm] phase inject (scratch write + resume): 0 ms (total 55 ms)
+[myc-vm] restored from snapshot in 25 ms
+[myc-vm] restore path: spawn->resumed 25 ms
+[myc-vm] exit marker observed 76 ms after resume — reaping the VMM now
+[myc-vm] VM process exited 26 ms after the exit marker (guest reboot + FC exit)
+[myc-vm] phase wait VM exit (agent pickup + exec + guest reboot): 102 ms (total 158 ms)
+[myc-vm] snapshot path total: 128 ms
+[myc-vm] phase teardown vmm reap: 1 ms
+[myc-vm] phase teardown console tailer: 4 ms
+[myc-vm] phase teardown iptables purge: 0 ms
+[myc-vm] phase teardown tap detach + lease release: 26 ms
+[myc-vm] phase teardown state dir: 0 ms
+[myc-vm] teardown total: 31 ms
+[myc-vm] phase teardown (vmm reap + iptables + tap/lease + state dir): 31 ms (total 190 ms)
+[myc-vm] snapshot_run total (entry to release done): 190 ms
+[myc-vm] pre-snapshot (assets + store resolve): 0 ms
+[myc-vm] phase gates (asset resolve + fc version): 1 ms (total 1 ms)
+[myc-vm] phase net (bridge + lease + tap + arp + iptables + proxies): 27 ms (total 29 ms)
+[myc-vm] snapshot cache: /home/nboukadoum-ext/wt-pool/bench/warm-pool/.snapcache-base/abc60b88f8640190a7ff07b874c258bbb47863c4e2c3f379c6e16fa4cd63b95a
+[myc-vm] phase fingerprint + snapshot lock: 0 ms (total 30 ms)
+[myc-vm] phase spawn firecracker + api wait: 51 ms (total 81 ms)
+[myc-vm] phase load_snapshot (restore): 60 ms (total 142 ms)
+[myc-vm] phase inject (scratch write + resume): 0 ms (total 142 ms)
+[myc-vm] restored from snapshot in 112 ms
+[myc-vm] restore path: spawn->resumed 112 ms
+[myc-vm] exit marker observed 73 ms after resume — reaping the VMM now
+[myc-vm] VM process exited 45 ms after the exit marker (guest reboot + FC exit)
+[myc-vm] phase wait VM exit (agent pickup + exec + guest reboot): 118 ms (total 261 ms)
+[myc-vm] snapshot path total: 231 ms
+[myc-vm] phase teardown vmm reap: 1 ms
+[myc-vm] phase teardown console tailer: 2 ms
+[myc-vm] phase teardown iptables purge: 0 ms
+[myc-vm] phase teardown tap detach + lease release: 95 ms
+[myc-vm] phase teardown state dir: 0 ms
+[myc-vm] teardown total: 100 ms
+[myc-vm] phase teardown (vmm reap + iptables + tap/lease + state dir): 100 ms (total 361 ms)
+[myc-vm] snapshot_run total (entry to release done): 361 ms

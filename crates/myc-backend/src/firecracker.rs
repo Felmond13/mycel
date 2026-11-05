@@ -1165,6 +1165,16 @@ impl FcRun {
             return;
         }
         self.released = true;
+        let trace = std::env::var("MYCEL_VM_TRACE").ok().as_deref() == Some("1");
+        let t_td = Instant::now();
+        let mut last_td = t_td;
+        let td_mark = |name: &str, last: &mut Instant| {
+            if trace {
+                let now = Instant::now();
+                eprintln!("[myc-vm] phase {name}: {} ms", (now - *last).as_millis());
+                *last = now;
+            }
+        };
         // 1. VMM: SIGTERM, grace, SIGKILL, reap.
         let deadline = Instant::now() + STOP_TIMEOUT;
         if let Some(vm) = self.vm.as_mut() {
@@ -1183,11 +1193,13 @@ impl FcRun {
                 }
             }
         }
+        td_mark("teardown vmm reap", &mut last_td);
         // 2. Console streamer.
         self.console_stop.store(true, Ordering::SeqCst);
         if let Some(handle) = self.console_tail.take() {
             let _ = handle.join();
         }
+        td_mark("teardown console tailer", &mut last_td);
         // 3. iptables rules (the -A/-I → -D flip, then the tag purge).
         for rule in &self.ipt_rules {
             let mut del = rule.clone();
@@ -1200,9 +1212,15 @@ impl FcRun {
             }
             while iptables_run(&iptables_bin(), &del) {}
         }
-        if let Some(lease) = &self.lease {
-            purge_tag_rules(&lease.tag);
+        // The tag purge costs two `iptables -S` spawns; it is only needed
+        // when this run actually pushed rules — a no-port run pushed none,
+        // and its lease was tag-purged at setup time already.
+        if !self.ipt_rules.is_empty() {
+            if let Some(lease) = &self.lease {
+                purge_tag_rules(&lease.tag);
+            }
         }
+        td_mark("teardown iptables purge", &mut last_td);
         // 4. Loopback relays.
         for mut proxy in self.proxies.drain(..) {
             proxy.stop();
@@ -1212,8 +1230,9 @@ impl FcRun {
             detach_tap(lease);
             release_lease(net, lease, &self.state_dir);
         }
-        // 6. Snapshot lock claim + jail tree.
-        self.lock = None; // Drop removes it
+        td_mark("teardown tap detach + lease release", &mut last_td);
+        // 6. Snapshot lock claim.
+        // 6. Snapshot lock claim + jail tree.        self.lock = None; // Drop removes it
         if let Some(tree) = self.jail_tree.take() {
             if std::env::var("MYCEL_VM_KEEP").ok().as_deref() == Some("1") {
                 eprintln!("[myc-vm] jail tree kept: {}", tree.display());
@@ -1226,6 +1245,10 @@ impl FcRun {
             eprintln!("[myc-vm] state dir kept: {}", self.state_dir.display());
         } else {
             let _ = std::fs::remove_dir_all(&self.state_dir);
+        }
+        td_mark("teardown state dir", &mut last_td);
+        if trace {
+            eprintln!("[myc-vm] teardown total: {} ms", t_td.elapsed().as_millis());
         }
     }
 }
@@ -1473,7 +1496,7 @@ fn console_tail(console: &Path, lines: usize) -> String {
 
 /// One full VM attempt (cold boot + snapshot, or restore). Returns the
 /// workload exit code, or a classified failure.
-fn run_vm(g: &mut FcRun, mode: Mode, ctx: &AttemptCtx) -> AttemptResult {
+fn run_vm(g: &mut FcRun, mode: Mode, ctx: &AttemptCtx, tm: &mut PhaseTimer) -> AttemptResult {
     let t_spawn = Instant::now();
     // A previous attempt in the same run (cold retry after a rejected
     // restore) may have left a live VMM — overwriting the handle would
@@ -1589,6 +1612,7 @@ fn run_vm(g: &mut FcRun, mode: Mode, ctx: &AttemptCtx) -> AttemptResult {
         ))
         .into());
     }
+    tm.mark("spawn firecracker + api wait");
     g.vm = Some(VmmHandle::Fc {
         child,
         client: FcClient {
@@ -1617,6 +1641,7 @@ fn run_vm(g: &mut FcRun, mode: Mode, ctx: &AttemptCtx) -> AttemptResult {
                 err.reject_restore = true;
                 return Err(err);
             }
+            tm.mark("load_snapshot (restore)");
         }
         Mode::Cold => {
             let boot_args = format!(
@@ -1729,6 +1754,7 @@ fn run_vm(g: &mut FcRun, mode: Mode, ctx: &AttemptCtx) -> AttemptResult {
         err.reject_restore = mode == Mode::Restore;
         return Err(err);
     }
+    tm.mark("inject (scratch write + resume)");
     if mode == Mode::Restore {
         eprintln!(
             "[myc-vm] restored from snapshot in {} ms",
@@ -1747,7 +1773,15 @@ fn run_vm(g: &mut FcRun, mode: Mode, ctx: &AttemptCtx) -> AttemptResult {
         );
     }
 
-    // --- wait for the guest (it reboots itself once the workload exits) --
+    // --- wait for the guest -------------------------------------------------
+    // Exit channel: the guest agent writes the MYCE exit marker + syncs
+    // BEFORE it reboots, so the host can observe the marker while the VM
+    // is still alive (the MYCR sentinel written pre-resume makes a mid-run
+    // poll safe — no stale MYCE can survive it). As soon as the marker is
+    // seen the workload is done and the exit code durable: SIGKILL the
+    // VMM instead of waiting for the guest reboot + FC teardown tail
+    // (measured: that tail was ~40-80 ms idle, ~270 ms under load — see
+    // docs/benchmarks/warm-pool-verdict.md). 5 ms poll granule.
     let interrupted = Arc::new(AtomicBool::new(false));
     {
         let flag = interrupted.clone();
@@ -1760,6 +1794,8 @@ fn run_vm(g: &mut FcRun, mode: Mode, ctx: &AttemptCtx) -> AttemptResult {
     let mut timed_out = false;
     let mut killing_since: Option<Instant> = None;
     let mut announced = false;
+    let t_loop = Instant::now();
+    let mut marker_at: Option<Instant> = None;
     loop {
         let mut want_shutdown = false;
         if interrupted.load(Ordering::SeqCst) {
@@ -1787,9 +1823,24 @@ fn run_vm(g: &mut FcRun, mode: Mode, ctx: &AttemptCtx) -> AttemptResult {
                 g.vm.as_mut().unwrap().kill();
             }
         }
+        if marker_at.is_none()
+            && !want_shutdown
+            && read_exit_marker(&SnapshotFiles::scratch(ctx.snapdir)).is_some()
+        {
+            marker_at = Some(Instant::now());
+            if ctx.trace {
+                eprintln!(
+                    "[myc-vm] exit marker observed {} ms after resume — reaping the VMM now",
+                    t_loop.elapsed().as_millis()
+                );
+            }
+            // Workload done, exit code durable: reap immediately rather
+            // than waiting out the guest reboot + FC exit tail.
+            g.vm.as_mut().unwrap().kill();
+        }
         match g.vm.as_mut().unwrap().try_wait() {
             Ok(Some(_)) => break,
-            Ok(None) => thread::sleep(Duration::from_millis(20)),
+            Ok(None) => thread::sleep(Duration::from_millis(5)),
             Err(e) => {
                 let mut err: AttemptErr = BackendError::Io(e).into();
                 err.committed = true;
@@ -1799,6 +1850,15 @@ fn run_vm(g: &mut FcRun, mode: Mode, ctx: &AttemptCtx) -> AttemptResult {
     }
 
     // --- exit code -------------------------------------------------------
+    if ctx.trace {
+        if let Some(at) = marker_at {
+            eprintln!(
+                "[myc-vm] VM process exited {} ms after the exit marker (guest reboot + FC exit)",
+                at.elapsed().as_millis()
+            );
+        }
+    }
+    tm.mark("wait VM exit (agent pickup + exec + guest reboot)");
     match read_exit_marker(&SnapshotFiles::scratch(ctx.snapdir)) {
         Some(code) => Ok(code),
         None => {
@@ -1915,6 +1975,36 @@ fn cold_rootfs(
     Ok(run_dir)
 }
 
+/// Cumulative phase timer for `MYCEL_VM_TRACE=1` decompositions: each
+/// `mark` prints the delta since the previous mark plus the total since
+/// entry, so a trace log reads as a timeline of the run.
+struct PhaseTimer {
+    trace: bool,
+    t0: Instant,
+    last: Instant,
+}
+
+impl PhaseTimer {
+    fn new(trace: bool) -> Self {
+        Self {
+            trace,
+            t0: Instant::now(),
+            last: Instant::now(),
+        }
+    }
+    fn mark(&mut self, name: &str) {
+        let now = Instant::now();
+        if self.trace {
+            eprintln!(
+                "[myc-vm] phase {name}: {} ms (total {} ms)",
+                (now - self.last).as_millis(),
+                (now - self.t0).as_millis()
+            );
+        }
+        self.last = now;
+    }
+}
+
 /// Try to serve `request` through the Firecracker snapshot cache. Falls
 /// back to the caller (Cloud Hypervisor path) with
 /// [`SnapshotOutcome::Unavailable`] whenever a piece is missing or a
@@ -1930,6 +2020,7 @@ pub fn snapshot_run(
 ) -> Result<SnapshotOutcome> {
     let unavail = |why: String| Ok(SnapshotOutcome::Unavailable(why));
     let trace = std::env::var("MYCEL_VM_TRACE").ok().as_deref() == Some("1");
+    let mut tm = PhaseTimer::new(trace);
 
     // --- gates ------------------------------------------------------------
     if request.no_snapshot_cache {
@@ -1995,6 +2086,7 @@ pub fn snapshot_run(
     let Some(mem_mib) = parse_mem_mib(&mem) else {
         return unavail(format!("unparsable MYCEL_VM_MEM '{mem}'"));
     };
+    tm.mark("gates (asset resolve + fc version)");
 
     // --- ports plan (same semantics as the CH path) ------------------------
     let mut ports: Vec<(u16, u16)> = request.publish.clone();
@@ -2084,6 +2176,7 @@ pub fn snapshot_run(
         guard.net = Some(net);
         guard.lease = Some(lease);
     }
+    tm.mark("net (bridge + lease + tap + arp + iptables + proxies)");
 
     // --- fingerprint + snapshot dir ----------------------------------------
     let kernel_sha = match file_sha256_cached(&fc_kernel) {
@@ -2144,6 +2237,7 @@ pub fn snapshot_run(
             return unavail("another run currently holds the snapshot for this environment".into())
         }
     }
+    tm.mark("fingerprint + snapshot lock");
 
     // --- command payload (the same run.env format the classic path bakes) --
     let hostname = if request.hostname.is_empty() {
@@ -2201,7 +2295,7 @@ pub fn snapshot_run(
     };
     let t0 = Instant::now();
     let code = loop {
-        match run_vm(&mut guard, mode, &ctx) {
+        match run_vm(&mut guard, mode, &ctx, &mut tm) {
             Ok(code) => break code,
             Err(e) => {
                 if e.committed {
@@ -2237,6 +2331,13 @@ pub fn snapshot_run(
         }
     }
     guard.release();
+    tm.mark("teardown (vmm reap + iptables + tap/lease + state dir)");
+    if trace {
+        eprintln!(
+            "[myc-vm] snapshot_run total (entry to release done): {} ms",
+            tm.t0.elapsed().as_millis()
+        );
+    }
     Ok(SnapshotOutcome::Ran(code))
 }
 
