@@ -1463,8 +1463,13 @@ impl VmRun {
         // MYCEL_VM_KEEP=1 (post-mortem debugging aid).
         if std::env::var("MYCEL_VM_KEEP").ok().as_deref() == Some("1") {
             eprintln!("[myc-vm] state dir kept: {}", self.state_dir.display());
-        } else {
-            let _ = std::fs::remove_dir_all(&self.state_dir);
+        } else if let Err(e) = std::fs::remove_dir_all(&self.state_dir) {
+            // Same policy as the FC path: a cleanup failure must be loud
+            // (an unexplained leak was observed once under load).
+            eprintln!(
+                "[myc-vm] state dir cleanup failed: {}: {e}",
+                self.state_dir.display()
+            );
         }
     }
 }

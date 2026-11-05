@@ -1236,15 +1236,22 @@ impl FcRun {
         if let Some(tree) = self.jail_tree.take() {
             if std::env::var("MYCEL_VM_KEEP").ok().as_deref() == Some("1") {
                 eprintln!("[myc-vm] jail tree kept: {}", tree.display());
-            } else {
-                let _ = std::fs::remove_dir_all(tree);
+            } else if let Err(e) = std::fs::remove_dir_all(&tree) {
+                // Never silent: an unexplained state-dir leak was observed
+                // once under load (docs/benchmarks/warm-pool-verdict.md §5,
+                // mechanism not reproduced) — invisible cleanup failures
+                // would hide a recurrence.
+                eprintln!("[myc-vm] jail tree cleanup failed: {tree:?}: {e}");
             }
         }
         // 7. State dir last (MYCEL_VM_KEEP keeps it for post-mortem).
         if std::env::var("MYCEL_VM_KEEP").ok().as_deref() == Some("1") {
             eprintln!("[myc-vm] state dir kept: {}", self.state_dir.display());
-        } else {
-            let _ = std::fs::remove_dir_all(&self.state_dir);
+        } else if let Err(e) = std::fs::remove_dir_all(&self.state_dir) {
+            eprintln!(
+                "[myc-vm] state dir cleanup failed: {}: {e}",
+                self.state_dir.display()
+            );
         }
         td_mark("teardown state dir", &mut last_td);
         if trace {
